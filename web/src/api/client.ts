@@ -91,6 +91,12 @@ export async function createContainer(payload: CreateContainerPayload) {
 export async function deleteContainer(id: string) {
   return api.delete(`/containers/${id}`)
 }
+export async function startContainer(id: string) {
+  return api.post(`/containers/${id}/start`)
+}
+export async function stopContainer(id: string) {
+  return api.post(`/containers/${id}/stop`)
+}
 
 export function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -14,6 +15,7 @@ import { listContainers, listNodes, fmtBytes, fmtTime, type Container, type Node
 
 use([CanvasRenderer, LineChart, GaugeChart, BarChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent])
 
+const { t } = useI18n()
 const nodes = ref<Node[]>([])
 const containers = ref<Container[]>([])
 let timer: number | undefined
@@ -160,14 +162,18 @@ const perNodeBar = computed(() => {
     legend: { textStyle: { color: 'var(--text-dim)' } },
   }
 })
+
+function stateLabel(s: string) {
+  return t(`state.${s}` as any, s)
+}
 </script>
 
 <template>
   <div class="page">
     <div class="page-header">
       <div>
-        <h1 class="page-title">Dashboard</h1>
-        <div class="page-subtitle">cluster overview · auto-refresh 5s</div>
+        <h1 class="page-title">{{ t('dashboard.title') }}</h1>
+        <div class="page-subtitle">{{ t('dashboard.subtitle') }}</div>
       </div>
     </div>
 
@@ -175,9 +181,11 @@ const perNodeBar = computed(() => {
       <el-card>
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <div>
-            <div style="color:var(--text-dim);font-size:12px;">Nodes</div>
+            <div style="color:var(--text-dim);font-size:12px;">{{ t('dashboard.cardNodes') }}</div>
             <div style="font-size:28px;font-weight:700;">{{ stats.online }} / {{ stats.nodes }}</div>
-            <div style="font-size:12px;color:var(--text-dim);">{{ stats.totalCores }} cores · {{ fmtBytes(stats.totalMem) }} mem · {{ stats.totalGpu }} GPU</div>
+            <div style="font-size:12px;color:var(--text-dim);">
+              {{ t('dashboard.cardNodesDetail', { cores: stats.totalCores, mem: fmtBytes(stats.totalMem), gpu: stats.totalGpu }) }}
+            </div>
           </div>
           <el-icon :size="32" color="var(--accent)"><Cpu /></el-icon>
         </div>
@@ -185,9 +193,9 @@ const perNodeBar = computed(() => {
       <el-card>
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <div>
-            <div style="color:var(--text-dim);font-size:12px;">Containers</div>
+            <div style="color:var(--text-dim);font-size:12px;">{{ t('dashboard.cardContainers') }}</div>
             <div style="font-size:28px;font-weight:700;">{{ stats.running }} / {{ stats.containers }}</div>
-            <div style="font-size:12px;color:var(--text-dim);">running / total</div>
+            <div style="font-size:12px;color:var(--text-dim);">{{ t('dashboard.cardContainersDetail') }}</div>
           </div>
           <el-icon :size="32" color="var(--blue)"><Box /></el-icon>
         </div>
@@ -196,48 +204,48 @@ const perNodeBar = computed(() => {
 
     <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(320px,1fr));margin-top:16px;">
       <el-card>
-        <template #header>Cluster CPU</template>
+        <template #header>{{ t('dashboard.gaugeClusterCpu') }}</template>
         <v-chart :option="cpuGauge" style="height:180px;" autoresize />
       </el-card>
       <el-card>
-        <template #header>Cluster Memory</template>
+        <template #header>{{ t('dashboard.gaugeClusterMemory') }}</template>
         <v-chart :option="memGauge" style="height:180px;" autoresize />
         <div style="font-size:12px;color:var(--text-dim);text-align:center;">
-          {{ fmtBytes(stats.usedMem) }} / {{ fmtBytes(stats.totalMem) }}
+          {{ t('dashboard.memText', { used: fmtBytes(stats.usedMem), total: fmtBytes(stats.totalMem) }) }}
         </div>
       </el-card>
       <el-card>
-        <template #header>Cluster GPU</template>
+        <template #header>{{ t('dashboard.gaugeClusterGpu') }}</template>
         <v-chart :option="gpuGauge" style="height:180px;" autoresize />
         <div style="font-size:12px;color:var(--text-dim);text-align:center;">
-          {{ stats.totalGpu }} GPUs across cluster
+          {{ t('dashboard.gpusAcrossCluster', { n: stats.totalGpu }) }}
         </div>
       </el-card>
     </div>
 
     <el-card style="margin-top:16px;">
-      <template #header>Per-node utilization</template>
+      <template #header>{{ t('dashboard.perNodeUtilization') }}</template>
       <v-chart :option="perNodeBar" style="height:280px;" autoresize />
     </el-card>
 
     <el-card style="margin-top:16px;">
-      <template #header>Recent containers</template>
+      <template #header>{{ t('dashboard.recentContainers') }}</template>
       <el-table :data="containers.slice(0, 8)" stripe>
-        <el-table-column prop="name" label="Name" />
-        <el-table-column prop="image" label="Image" />
-        <el-table-column prop="node_name" label="Node" />
-        <el-table-column label="State">
+        <el-table-column :label="t('dashboard.colName')" prop="name" />
+        <el-table-column :label="t('dashboard.colImage')" prop="image" />
+        <el-table-column :label="t('dashboard.colNode')" prop="node_name" />
+        <el-table-column :label="t('dashboard.colState')">
           <template #default="{ row }">
-            <span :class="['status-dot', row.state]"></span>{{ row.state }}
+            <span :class="['status-dot', row.state]"></span>{{ stateLabel(row.state) }}
           </template>
         </el-table-column>
-        <el-table-column label="External">
+        <el-table-column :label="t('dashboard.colExternal')">
           <template #default="{ row }">
             <a v-if="row.external_url" :href="row.external_url" target="_blank">:{{ row.external_port }}</a>
-            <span v-else>—</span>
+            <span v-else>{{ t('common.na') }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Created">
+        <el-table-column :label="t('dashboard.colCreated')">
           <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
         </el-table-column>
       </el-table>

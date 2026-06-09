@@ -207,6 +207,8 @@ func (s *Session) handleIncoming(ctx context.Context, mgr *Manager, msg *pb.Agen
 		s.handleContainerCreated(ctx, mgr, p.ContainerCreated)
 	case *pb.AgentMessage_ContainerStopped:
 		s.handleContainerStopped(ctx, mgr, p.ContainerStopped)
+	case *pb.AgentMessage_ContainerStarted:
+		s.handleContainerStarted(ctx, mgr, p.ContainerStarted)
 	case *pb.AgentMessage_ProxyData:
 		s.deliverProxyData(p.ProxyData)
 	case *pb.AgentMessage_ProxyClose:
@@ -260,6 +262,15 @@ func (s *Session) handleContainerStopped(ctx context.Context, mgr *Manager, c *p
 	} else {
 		_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, "exited", "exited")
 	}
+	mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "container", At: time.Now()})
+}
+
+func (s *Session) handleContainerStarted(ctx context.Context, mgr *Manager, c *pb.ContainerStarted) {
+	state, status := "running", "running"
+	if c.Error != "" {
+		state, status = "error", c.Error
+	}
+	_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, state, status)
 	mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "container", At: time.Now()})
 }
 

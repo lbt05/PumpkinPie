@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -56,9 +57,11 @@ func (s *Server) Engine() *gin.Engine {
 
 	r.GET("/api/containers", s.listContainers)
 	r.GET("/api/containers/:id", s.getContainer)
+
 	r.POST("/api/containers", s.createContainer)
 	r.DELETE("/api/containers/:id", s.deleteContainer)
-	r.POST("/api/containers/:id/restart", s.restartContainer)
+	r.POST("/api/containers/:id/start", s.startContainer)
+	r.POST("/api/containers/:id/stop", s.stopContainer)
 
 	r.GET("/api/ws", s.websocket)
 
@@ -216,6 +219,18 @@ func (s *Server) createContainer(c *gin.Context) {
 	}
 
 	containerID := newContainerID()
+
+	// If the user left the name blank, generate a friendly one based on
+	// the image, e.g. "pp-nginx-alpine-x7t2c". This still goes to the
+	// agent as Docker's container name (must match DNS-1123).
+	containerName := req.Name
+	if strings.TrimSpace(containerName) == "" {
+		containerName = autoName(req.Image)
+	}
+	// Sanity: agent will reject names that aren't valid. Keep it ASCII-safe
+	// and short.
+	containerName = sanitizeContainerName(containerName)
+
 	ports := make([]*pb.PortMapping, 0, len(req.PortMappings))
 	for _, p := range req.PortMappings {
 		proto := p.Protocol
@@ -247,7 +262,7 @@ func (s *Server) createContainer(c *gin.Context) {
 	cc := &store.Container{
 		ID:           containerID,
 		NodeID:       target.ID,
-		Name:         req.Name,
+		Name:         containerName,
 		Image:        req.Image,
 		State:        "creating",
 		Status:       "creating",
@@ -286,7 +301,7 @@ func (s *Server) createContainer(c *gin.Context) {
 			MemoryBytes: req.MemoryBytes,
 			GpuCount:    req.GPUCount,
 		},
-		Name: req.Name,
+		Name: containerName,
 		Pull: req.Pull,
 	}
 	if err := sess.Send(&pb.MasterMessage{
@@ -365,7 +380,29 @@ func (s *Server) listContainers(c *gin.Context) {
 	c.JSON(200, gin.H{"containers": out})
 }
 
+// deleteContainer stops + removes the Docker container, then forgets
+// about it on the master (releases the proxy port and DB row).
 func (s *Server) deleteContainer(c *gin.Context) {
+	id := c.Param("id")
+	cc, err := s.store.GetContainer(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(404, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.sendStopCommand(c, cc, true); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if cc.ExternalPort != 0 {
+		s.proxy.UnregisterRoute(cc.ExternalPort)
+		_ = s.store.FreePort(c.Request.Context(), cc.ExternalPort)
+	}
+	_ = s.store.DeleteContainer(c.Request.Context(), id)
+	c.JSON(200, gin.H{"ok": true})
+}
+
+// startContainer starts an existing (stopped) Docker container.
+func (s *Server) startContainer(c *gin.Context) {
 	id := c.Param("id")
 	cc, err := s.store.GetContainer(c.Request.Context(), id)
 	if err != nil {
@@ -378,25 +415,67 @@ func (s *Server) deleteContainer(c *gin.Context) {
 		return
 	}
 	if err := sess.Send(&pb.MasterMessage{
-		Payload: &pb.MasterMessage_StopContainer{StopContainer: &pb.StopContainerCommand{
+		Payload: &pb.MasterMessage_StartContainer{StartContainer: &pb.StartContainerCommand{
 			ContainerId: cc.ID,
 			DockerId:    cc.DockerID,
-			Remove:      true,
 		}},
 	}); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	// Re-bind the proxy port + route if it was released while the
+	// container was stopped. The proxy already has the listener
+	// bookkeeping, so we re-register the route then ask it to bind.
 	if cc.ExternalPort != 0 {
-		s.proxy.UnregisterRoute(cc.ExternalPort)
-		_ = s.store.FreePort(c.Request.Context(), cc.ExternalPort)
+		port := cc.ExternalPort
+		var firstContainerPort uint32
+		if len(cc.PortsJSON) > 0 {
+			var ports []portMappingJSON
+			if err := json.Unmarshal([]byte(cc.PortsJSON), &ports); err == nil && len(ports) > 0 {
+				firstContainerPort = ports[0].ContainerPort
+			}
+		}
+		s.proxy.RegisterRoute(port, cc.ID, cc.NodeID, firstContainerPort)
+		if err := s.proxy.BindPort(s.lifetime, port); err != nil {
+			log.Printf("rebind proxy port %d after start failed: %v", port, err)
+		}
 	}
-	_ = s.store.DeleteContainer(c.Request.Context(), id)
 	c.JSON(200, gin.H{"ok": true})
 }
 
-func (s *Server) restartContainer(c *gin.Context) {
-	c.JSON(501, gin.H{"error": "restart not implemented; stop and recreate"})
+// stopContainer stops a running container but keeps it (and its proxy
+// port) around so it can be started again.
+func (s *Server) stopContainer(c *gin.Context) {
+	id := c.Param("id")
+	cc, err := s.store.GetContainer(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(404, gin.H{"error": err.Error()})
+		return
+	}
+	if err := s.sendStopCommand(c, cc, false); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	// Release the proxy port so the next container can grab it; we re-bind
+	// on the next /start call.
+	if cc.ExternalPort != 0 {
+		s.proxy.UnregisterRoute(cc.ExternalPort)
+	}
+	c.JSON(200, gin.H{"ok": true})
+}
+
+func (s *Server) sendStopCommand(c *gin.Context, cc *store.Container, remove bool) error {
+	sess := s.mgr.Get(cc.NodeID)
+	if sess == nil {
+		return errors.New("node offline")
+	}
+	return sess.Send(&pb.MasterMessage{
+		Payload: &pb.MasterMessage_StopContainer{StopContainer: &pb.StopContainerCommand{
+			ContainerId: cc.ID,
+			DockerId:    cc.DockerID,
+			Remove:      remove,
+		}},
+	})
 }
 
 // ---- WebSocket ----

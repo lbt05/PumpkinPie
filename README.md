@@ -64,7 +64,9 @@ The master does not expose a single "proxy port" — every container
 created on the cluster gets its own dedicated port in the range
 **30000-32767** (see "Reverse-proxy URL scheme" below).
 
-Open <http://localhost:8080/console/> in your browser.
+Open <http://localhost:8080/console/> in your browser. Use the language
+selector at the bottom of the sidebar to switch between **English** and
+**简体中文** — your choice is persisted in `localStorage`.
 
 ### 3. Start one or more Agents (on any machine with Docker)
 

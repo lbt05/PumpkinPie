@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -63,11 +64,43 @@ func (c *Client) Ping(ctx context.Context) error {
 	return err
 }
 
+// ImageExists returns true if the local Docker daemon has the given image
+// reference in its cache. Used to decide whether a pull is needed under
+// the "IfNotPresent" pull policy.
+func (c *Client) ImageExists(ctx context.Context, image string) (bool, error) {
+	name := urlPathEscape(image)
+	_, err := c.do(ctx, "GET", "/images/"+name+"/json", nil)
+	if err == nil {
+		return true, nil
+	}
+	if strings.Contains(err.Error(), " -> 404") {
+		return false, nil
+	}
+	return false, err
+}
+
 // Create starts a container. Returns the docker container ID.
+//
+// Pull policy:
+//   cmd.Pull == true  -> Always: pull unconditionally (also updates the
+//     local tag if a newer version exists upstream).
+//   cmd.Pull == false -> IfNotPresent: only pull if the image is not
+//     already in the local cache. Most common case.
 func (c *Client) Create(ctx context.Context, cmd *pb.CreateContainerCommand) (string, error) {
 	if cmd.Pull {
 		if err := c.pull(ctx, cmd.Image); err != nil {
 			return "", fmt.Errorf("pull %s: %w", cmd.Image, err)
+		}
+	} else {
+		exists, err := c.ImageExists(ctx, cmd.Image)
+		if err != nil {
+			// non-fatal: just try the create, the daemon will tell us
+			log.Printf("image-exists check for %s failed: %v (proceeding with create)", cmd.Image, err)
+		} else if !exists {
+			log.Printf("image %s not present locally, pulling", cmd.Image)
+			if err := c.pull(ctx, cmd.Image); err != nil {
+				return "", fmt.Errorf("pull %s (IfNotPresent): %w", cmd.Image, err)
+			}
 		}
 	}
 
@@ -159,6 +192,13 @@ func (c *Client) Stop(ctx context.Context, dockerID string, remove bool) error {
 		}
 	}
 	return nil
+}
+
+// Start starts an existing (created but stopped) container. Returns an
+// error if the container is already running or no longer exists.
+func (c *Client) Start(ctx context.Context, dockerID string) error {
+	_, err := c.do(ctx, "POST", "/containers/"+dockerID+"/start", nil)
+	return err
 }
 
 // Inspect returns the raw inspect JSON.
@@ -296,6 +336,21 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body io.Reader
 func queryEscape(s string) string {
 	// minimal escape
 	r := strings.NewReplacer(" ", "%20", "\"", "%22", "{", "%7B", "}", "%7D", "[", "%5B", "]", "%5D", ",", "%2C")
+	return r.Replace(s)
+}
+
+// urlPathEscape escapes a string for use inside a URL path segment.
+// Unlike queryEscape, it preserves '/' so registry paths like
+// "myregistry.io/app:1.0" round-trip correctly.
+func urlPathEscape(s string) string {
+	r := strings.NewReplacer(
+		" ", "%20",
+		"\"", "%22",
+		"#", "%23",
+		"?", "%3F",
+		"@", "%40",
+		":", "%3A",
+	)
 	return r.Replace(s)
 }
 

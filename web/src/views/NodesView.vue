@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { fmtBytes, fmtTime, listNodes, type Node } from '@/api/client'
 
+const { t } = useI18n()
 const nodes = ref<Node[]>([])
 let timer: number | undefined
 
@@ -20,22 +22,28 @@ onUnmounted(() => timer && clearInterval(timer))
 
 const online = computed(() => nodes.value.filter((n) => n.state === 'online'))
 const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
+
+function stateLabel(s: string) {
+  return t(`state.${s}` as any, s)
+}
 </script>
 
 <template>
   <div class="page">
     <div class="page-header">
       <div>
-        <h1 class="page-title">Nodes</h1>
-        <div class="page-subtitle">{{ online.length }} online · {{ offline.length }} offline</div>
+        <h1 class="page-title">{{ t('nodes.title') }}</h1>
+        <div class="page-subtitle">
+          {{ t('nodes.online', { n: online.length }) }} · {{ t('nodes.offline', { n: offline.length }) }}
+        </div>
       </div>
     </div>
 
     <div v-if="!nodes.length" style="text-align:center;color:var(--text-dim);padding:48px 0;">
       <el-icon :size="48"><Cpu /></el-icon>
-      <div style="margin-top:12px;">No agents registered yet.</div>
+      <div style="margin-top:12px;">{{ t('nodes.empty') }}</div>
       <div style="margin-top:8px;font-size:12px;">
-        Start an agent with: <code>./bin/agent --master=master:7000 --name=my-node</code>
+        {{ t('nodes.emptyHint') }} <code>pp agent --master=master:7000 --name=my-node</code>
       </div>
     </div>
 
@@ -47,7 +55,9 @@ const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
               <span :class="['status-dot', n.state]"></span>
               <strong>{{ n.name }}</strong>
             </div>
-            <el-tag size="small" :type="n.state==='online' ? 'success' : 'info'">{{ n.state }}</el-tag>
+            <el-tag size="small" :type="n.state==='online' ? 'success' : 'info'">
+              {{ stateLabel(n.state) }}
+            </el-tag>
           </div>
         </template>
 
@@ -57,13 +67,13 @@ const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
 
         <div class="metric-grid">
           <div class="metric">
-            <div class="metric-label">CPU</div>
+            <div class="metric-label">{{ t('nodes.cpu') }}</div>
             <div class="metric-value">{{ n.cpu_percent.toFixed(1) }}%</div>
             <div class="metric-bar"><span :style="{ width: Math.min(n.cpu_percent,100)+'%' }"></span></div>
-            <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">{{ n.cpu_cores }} cores</div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">{{ n.cpu_cores }} {{ t('unit.cores') }}</div>
           </div>
           <div class="metric">
-            <div class="metric-label">Memory</div>
+            <div class="metric-label">{{ t('nodes.memory') }}</div>
             <div class="metric-value">
               {{ n.mem_total_bytes>0 ? ((n.mem_used_bytes/n.mem_total_bytes)*100).toFixed(1) : 0 }}%
             </div>
@@ -73,13 +83,13 @@ const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
             </div>
           </div>
           <div class="metric">
-            <div class="metric-label">Load (1m)</div>
+            <div class="metric-label">{{ t('nodes.load') }}</div>
             <div class="metric-value">{{ n.load1.toFixed(2) }}</div>
           </div>
           <div class="metric">
-            <div class="metric-label">GPU</div>
+            <div class="metric-label">{{ t('nodes.gpu') }}</div>
             <div class="metric-value">
-              {{ n.gpu_count > 0 ? n.gpu_usage_percent.toFixed(1)+'%' : 'none' }}
+              {{ n.gpu_count > 0 ? n.gpu_usage_percent.toFixed(1)+'%' : t('common.none') }}
             </div>
             <div v-if="n.gpu_count > 0" style="font-size:11px;color:var(--text-dim);margin-top:4px;">
               {{ n.gpu_count }} GPU · {{ fmtBytes(n.gpu_mem_used_bytes) }} / {{ fmtBytes(n.gpu_mem_total_bytes) }}
@@ -88,7 +98,7 @@ const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
         </div>
 
         <div v-if="n.disks && n.disks.length" style="margin-top:12px;">
-          <div style="color:var(--text-dim);font-size:12px;margin-bottom:4px;">Disks</div>
+          <div style="color:var(--text-dim);font-size:12px;margin-bottom:4px;">{{ t('nodes.disks') }}</div>
           <div v-for="d in n.disks.slice(0,4)" :key="d.path" style="margin-bottom:6px;">
             <div style="display:flex;justify-content:space-between;font-size:12px;">
               <span>{{ d.path }}</span>
@@ -102,7 +112,7 @@ const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
         </div>
 
         <div v-if="n.gpus && n.gpus.length" style="margin-top:12px;">
-          <div style="color:var(--text-dim);font-size:12px;margin-bottom:4px;">GPUs</div>
+          <div style="color:var(--text-dim);font-size:12px;margin-bottom:4px;">{{ t('nodes.gpus') }}</div>
           <div v-for="g in n.gpus" :key="g.uuid" style="margin-bottom:6px;font-size:12px;">
             <div style="display:flex;justify-content:space-between;">
               <span>GPU {{ g.index }}: {{ g.name }}</span>
@@ -116,7 +126,7 @@ const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
         </div>
 
         <div style="font-size:11px;color:var(--text-dim);margin-top:10px;">
-          last heartbeat: {{ fmtTime(n.last_heartbeat) }} · metrics at: {{ fmtTime(n.metrics_at) }}
+          {{ t('nodes.lastHeartbeat', { t: fmtTime(n.last_heartbeat) }) }} · {{ t('nodes.metricsAt', { t: fmtTime(n.metrics_at) }) }}
         </div>
       </el-card>
     </div>

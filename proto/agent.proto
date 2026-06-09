@@ -19,6 +19,7 @@ message AgentMessage {
     MetricReport         metrics        = 3;
     ContainerCreated     container_created = 4;
     ContainerStopped     container_stopped = 5;
+    ContainerStarted     container_started = 8;
     ProxyTunnelData      proxy_data     = 10;
     ProxyTunnelClose     proxy_close    = 11;
   }
@@ -29,6 +30,7 @@ message MasterMessage {
     RegisterResponse          register_resp      = 1;
     CreateContainerCommand    create_container   = 2;
     StopContainerCommand      stop_container     = 3;
+    StartContainerCommand     start_container    = 7;
     ListContainersRequest     list_containers    = 4;
     ListContainersResponse    list_containers_resp = 5;
     OpenTunnel                open_tunnel        = 6;
@@ -151,6 +153,17 @@ message StopContainerCommand {
   string            container_id    = 1;
   string            docker_id       = 2;
   bool              remove          = 3;
+}
+
+message StartContainerCommand {
+  string            container_id    = 1;
+  string            docker_id       = 2;
+}
+
+message ContainerStarted {
+  string            container_id    = 1;
+  string            docker_id       = 2;
+  string            error           = 3;
 }
 
 message ContainerStopped {

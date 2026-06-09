@@ -192,6 +192,8 @@ func (a *Agent) handleMasterMessage(ctx context.Context, msg *pb.MasterMessage) 
 		go a.handleCreate(ctx, p.CreateContainer)
 	case *pb.MasterMessage_StopContainer:
 		go a.handleStop(ctx, p.StopContainer)
+	case *pb.MasterMessage_StartContainer:
+		go a.handleStart(ctx, p.StartContainer)
 	case *pb.MasterMessage_OpenTunnel:
 		go a.handleOpenTunnel(p.OpenTunnel)
 	case *pb.MasterMessage_ProxyData:
@@ -220,6 +222,18 @@ func (a *Agent) handleStop(ctx context.Context, cmd *pb.StopContainerCommand) {
 		resp.Error = err.Error()
 	}
 	_ = a.send(&pb.AgentMessage{Payload: &pb.AgentMessage_ContainerStopped{ContainerStopped: resp}})
+}
+
+func (a *Agent) handleStart(ctx context.Context, cmd *pb.StartContainerCommand) {
+	err := a.docker.Start(ctx, cmd.DockerId)
+	resp := &pb.ContainerStarted{ContainerId: cmd.ContainerId, DockerId: cmd.DockerId}
+	if err != nil {
+		resp.Error = err.Error()
+		log.Printf("start container %s failed: %v", cmd.ContainerId, err)
+	} else {
+		log.Printf("started container %s (docker %s) on %s", cmd.ContainerId, shortID(cmd.DockerId), a.nodeName)
+	}
+	_ = a.send(&pb.AgentMessage{Payload: &pb.AgentMessage_ContainerStarted{ContainerStarted: resp}})
 }
 
 // ---- Proxy tunnel ----
