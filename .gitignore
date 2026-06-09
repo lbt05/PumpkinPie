@@ -1,0 +1,25 @@
+# Go
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Web
+web/node_modules/
+web/dist/
+.env.local
+
+# Generated proto
+/proto/gen/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

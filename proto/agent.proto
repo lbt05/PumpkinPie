@@ -1,0 +1,194 @@
+syntax = "proto3";
+
+package pumpkinpie.v1;
+
+option go_package = "github.com/pumpkinpie/pumpkinpie/proto/gen";
+
+// =====================================================================
+// AgentService: Master <-> Agent long-lived bidirectional control stream
+// =====================================================================
+service AgentService {
+  rpc Connect(stream AgentMessage) returns (stream MasterMessage);
+}
+
+// One message type per direction, switched by `payload`.
+message AgentMessage {
+  oneof payload {
+    RegisterRequest      register       = 1;
+    Heartbeat            heartbeat      = 2;
+    MetricReport         metrics        = 3;
+    ContainerCreated     container_created = 4;
+    ContainerStopped     container_stopped = 5;
+    ProxyTunnelData      proxy_data     = 10;
+    ProxyTunnelClose     proxy_close    = 11;
+  }
+}
+
+message MasterMessage {
+  oneof payload {
+    RegisterResponse          register_resp      = 1;
+    CreateContainerCommand    create_container   = 2;
+    StopContainerCommand      stop_container     = 3;
+    ListContainersRequest     list_containers    = 4;
+    ListContainersResponse    list_containers_resp = 5;
+    OpenTunnel                open_tunnel        = 6;
+    ProxyTunnelData           proxy_data         = 10;
+    ProxyTunnelClose          proxy_close        = 11;
+  }
+}
+
+message OpenTunnel {
+  string            tunnel_id       = 1;
+  uint32            container_port  = 2;
+  string            container_id    = 3;
+}
+
+// ---------- Registration ----------
+message RegisterRequest {
+  string            name        = 1;
+  string            hostname    = 2;
+  string            os          = 3;
+  string            arch        = 4;
+  string            agent_version = 5;
+  repeated string   docker_volumes = 6; // host paths mounted into agent
+}
+
+message RegisterResponse {
+  string            node_id     = 1;
+  bool              ok          = 2;
+  string            error       = 3;
+  int32             metrics_interval_sec = 4;
+}
+
+// ---------- Metrics ----------
+message Heartbeat {
+  int64             ts_unix_ms  = 1;
+}
+
+message MetricReport {
+  int64             ts_unix_ms  = 1;
+  CpuStats          cpu         = 2;
+  MemoryStats       memory      = 3;
+  repeated DiskStats disks      = 4;
+  GpuStats          gpu         = 5;
+  LoadAvg           load        = 6;
+}
+
+message CpuStats {
+  double            usage_percent   = 1; // 0-100 across all cores
+  uint32            cores           = 2;
+  repeated double   per_core_percent = 3;
+}
+
+message MemoryStats {
+  uint64            total_bytes     = 1;
+  uint64            used_bytes      = 2;
+  double            usage_percent   = 3;
+}
+
+message DiskStats {
+  string            path            = 1;
+  uint64            total_bytes     = 2;
+  uint64            used_bytes      = 3;
+  double            usage_percent   = 4;
+}
+
+message GpuStats {
+  uint32            count           = 1;
+  repeated GpuDevice devices        = 2;
+  // Convenience sums
+  double            usage_percent   = 3;
+  uint64            mem_used_bytes  = 4;
+  uint64            mem_total_bytes = 5;
+}
+
+message GpuDevice {
+  uint32            index           = 1;
+  string            name            = 2;
+  string            uuid            = 3;
+  double            usage_percent   = 4;
+  uint64            mem_used_bytes  = 5;
+  uint64            mem_total_bytes = 6;
+}
+
+message LoadAvg {
+  double            load1           = 1;
+  double            load5           = 2;
+  double            load15          = 3;
+}
+
+// ---------- Containers ----------
+message PortMapping {
+  uint32            container_port  = 1;
+  string            protocol        = 2; // tcp / udp
+}
+
+message ResourceSpec {
+  double            cpu_cores       = 1; // 0 = unlimited
+  uint64            memory_bytes    = 2; // 0 = unlimited
+  uint32            gpu_count       = 3; // 0 = no GPU
+}
+
+message CreateContainerCommand {
+  string            container_id    = 1; // master-assigned id
+  string            image           = 2;
+  repeated string   env             = 3;
+  repeated string   cmd             = 4;
+  repeated string   volume_binds    = 5; // host:container[:ro]
+  repeated PortMapping ports        = 6;
+  ResourceSpec      resources       = 7;
+  string            name            = 8;
+  bool              pull            = 9; // pull image before create
+}
+
+message ContainerCreated {
+  string            container_id    = 1;
+  string            docker_id       = 2;
+  string            error           = 3;
+}
+
+message StopContainerCommand {
+  string            container_id    = 1;
+  string            docker_id       = 2;
+  bool              remove          = 3;
+}
+
+message ContainerStopped {
+  string            container_id    = 1;
+  string            docker_id       = 2;
+  string            error           = 3;
+}
+
+message ListContainersRequest {}
+
+message ListContainersResponse {
+  repeated ContainerInfo containers = 1;
+}
+
+message ContainerInfo {
+  string            container_id    = 1;
+  string            docker_id       = 2;
+  string            node_id         = 3;
+  string            name            = 4;
+  string            image           = 5;
+  string            state           = 6; // running/exited/...
+  string            status          = 7;
+  repeated PortMapping ports        = 8;
+  uint32            external_port   = 9; // assigned by master
+  ResourceSpec      resources       = 10;
+  int64             created_unix_ms = 11;
+}
+
+// ---------- Proxy tunnel ----------
+// Used to forward raw bytes between Master reverse-proxy and Agent container port.
+message ProxyTunnelData {
+  string            tunnel_id       = 1;
+  uint32            container_port  = 2;
+  bytes             data            = 3;
+  bool              close_after     = 4; // half-close: container will not receive more
+}
+
+message ProxyTunnelClose {
+  string            tunnel_id       = 1;
+  string            reason          = 2;
+}
