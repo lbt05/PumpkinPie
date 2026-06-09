@@ -48,7 +48,7 @@ web-build:
 
 .PHONY: run-master
 run-master:
-	$(GO) run ./cmd/pp master --http=:8080 --grpc=:7000 --proxy-port=8081 --db=./pp.db
+	$(GO) run ./cmd/pp master --http=:8080 --grpc=:7000 --db=./pp.db
 
 .PHONY: run-agent
 run-agent:

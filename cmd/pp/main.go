@@ -65,7 +65,7 @@ Subcommands:
 Run 'pp <subcommand> -h' for subcommand-specific flags.
 
 Examples:
-  pp master --http=:8080 --grpc=:7000 --proxy-port=8081 --db=./pp.db
+  pp master --http=:8080 --grpc=:7000 --db=./pp.db
   pp agent  --master=10.0.0.1:7000 --name=node-A
 `)
 }

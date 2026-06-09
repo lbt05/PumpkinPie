@@ -57,9 +57,12 @@ make all           # generates proto, builds web/dist, builds bin/pp
 ./bin/pp master \
   --http=:8080          # UI + REST API
   --grpc=:7000          # gRPC for agents
-  --proxy-port=8081     # public reverse-proxy port
   --db=./pumpkinpie.db  # SQLite
 ```
+
+The master does not expose a single "proxy port" — every container
+created on the cluster gets its own dedicated port in the range
+**30000-32767** (see "Reverse-proxy URL scheme" below).
 
 Open <http://localhost:8080/ui/> in your browser.
 
