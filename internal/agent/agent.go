@@ -225,7 +225,9 @@ func (a *Agent) handleStop(ctx context.Context, cmd *pb.StopContainerCommand) {
 // ---- Proxy tunnel ----
 
 // handleOpenTunnel opens a TCP connection to the docker container's mapped host port
-// and starts a goroutine that streams data both ways.
+// and starts a goroutine that streams data both ways. The tunnel struct is
+// registered synchronously so the very next ProxyData message — which can
+// arrive in the same gRPC Recv batch — can find it.
 func (a *Agent) handleOpenTunnel(cmd *pb.OpenTunnel) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t := &tunnel{
@@ -334,15 +336,26 @@ func (a *Agent) resolveContainerHostPort(containerID string, containerPort uint1
 }
 
 func (a *Agent) handleProxyDataFromMaster(d *pb.ProxyTunnelData) {
-	a.tunnelMu.Lock()
-	t, ok := a.tunnels[d.TunnelId]
-	a.tunnelMu.Unlock()
-	if !ok {
-		return
-	}
-	select {
-	case t.dataCh <- d:
-	case <-t.finished:
+	// The matching OpenTunnel may not have been processed yet (the master
+	// sends both in the same gRPC stream and the agent processes them on
+	// the same Recv loop). Briefly wait for the tunnel to appear.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		a.tunnelMu.Lock()
+		t, ok := a.tunnels[d.TunnelId]
+		a.tunnelMu.Unlock()
+		if ok {
+			select {
+			case t.dataCh <- d:
+			case <-t.finished:
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			log.Printf("agent: handleProxyDataFromMaster tunnel=%s not found (timed out)", d.TunnelId)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

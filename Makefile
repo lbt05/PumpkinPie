@@ -22,10 +22,17 @@ proto:
 tidy:
 	$(GO) mod tidy
 
+.PHONY: test
+test:
+	$(GO) test ./...
+
+.PHONY: test-race
+test-race:
+	$(GO) test -race ./...
+
 .PHONY: build
 build:
-	$(GO) build -o bin/master ./cmd/master
-	$(GO) build -o bin/agent  ./cmd/agent
+	$(GO) build -o bin/pp ./cmd/pp
 
 .PHONY: web-deps
 web-deps:
@@ -41,11 +48,11 @@ web-build:
 
 .PHONY: run-master
 run-master:
-	$(GO) run ./cmd/master
+	$(GO) run ./cmd/pp master --http=:8080 --grpc=:7000 --proxy-port=8081 --db=./pp.db
 
 .PHONY: run-agent
 run-agent:
-	$(GO) run ./cmd/agent --master=127.0.0.1:7000 --name=local-node
+	$(GO) run ./cmd/pp agent --master=127.0.0.1:7000 --name=local-node
 
 .PHONY: clean
 clean:

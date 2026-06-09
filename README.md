@@ -48,13 +48,13 @@ tunneled over gRPC to the right node.
 ### 1. Build everything
 
 ```bash
-make all           # generates proto, builds web/dist, builds bin/master and bin/agent
+make all           # generates proto, builds web/dist, builds bin/pp
 ```
 
 ### 2. Start the Master
 
 ```bash
-./bin/master \
+./bin/pp master \
   --http=:8080          # UI + REST API
   --grpc=:7000          # gRPC for agents
   --proxy-port=8081     # public reverse-proxy port
@@ -73,20 +73,33 @@ The agent discovers the Docker socket in this order:
 
 ```bash
 # Linux with standard Docker — no env var needed
-./bin/agent --master=master.example.com:7000 --name=node-A
+./bin/pp agent --master=master.example.com:7000 --name=node-A
 
 # Linux with rootless Docker
-DOCKER_SOCK=$XDG_RUNTIME_DIR/docker.sock ./bin/agent --master=... --name=node-A
+DOCKER_SOCK=$XDG_RUNTIME_DIR/docker.sock ./bin/pp agent --master=... --name=node-A
 
 # macOS Docker Desktop
-DOCKER_SOCK=$HOME/.docker/run/docker.sock ./bin/agent --master=... --name=node-A
+DOCKER_SOCK=$HOME/.docker/run/docker.sock ./bin/pp agent --master=... --name=node-A
 
 # Remote Docker daemon
-DOCKER_HOST=tcp://docker-host:2375 ./bin/agent --master=... --name=node-A
+DOCKER_HOST=tcp://docker-host:2375 ./bin/pp agent --master=... --name=node-A
 ```
 
 Within ~5 seconds the node cards should appear in the dashboard with live
 metrics.
+
+### 5. Subcommands
+
+`pp` is a single binary that runs as either role:
+
+```
+pp master [flags]   # control plane: UI + API + gRPC + reverse proxy
+pp agent  [flags]   # node agent: registers to master, hosts containers
+pp version          # print version
+pp help             # print usage
+```
+
+Run `pp <subcommand> -h` to see flags for a subcommand.
 
 ### 4. Create a container
 
@@ -102,18 +115,23 @@ verify the proxy works.
 
 ## Reverse-proxy URL scheme
 
+Each container gets a dedicated port in the range **30000-32767**, chosen
+automatically when the container is created (and freed when it's deleted).
+
 ```
-http://<master>:<proxy-port>/c/<container_id>/<path>
+http://localhost:30000/   →  container on first online node
+http://localhost:30001/   →  container on next online node
+...
 ```
 
-For example `http://localhost:8081/c/c-7bb09bb560f9/`. The Master hijacks
-the connection, opens a gRPC tunnel to the owning node, and pipes bytes
-both ways. The container's original path is preserved (the `/c/<id>` prefix
-is stripped before being sent to the container).
+The Master opens a fresh `net.Listener` only for the ports actually in
+use, so the number of open file descriptors equals the number of
+running containers (not the size of the port range). After deleting a
+container, its port is immediately released and reused by the next
+container.
 
-This single-port design avoids the need to bind hundreds of ports when
-many containers are deployed; just add a DNS record or `/etc/hosts` entry
-if you want a prettier hostname.
+Under the hood, the Master hijacks the HTTP connection, opens a gRPC
+tunnel to the owning node, and pipes bytes both ways.
 
 ## Architecture notes
 
@@ -135,8 +153,10 @@ if you want a prettier hostname.
 ```bash
 make proto                 # regenerate Go code from proto/agent.proto
 make web-dev               # Vite dev server with /api proxy to :8080
-make run-master            # go run ./cmd/master
-make run-agent             # go run ./cmd/agent --master=127.0.0.1:7000 --name=local-node
+make run-master            # go run ./cmd/pp master
+make run-agent             # go run ./cmd/pp agent --master=127.0.0.1:7000 --name=local-node
+make test                  # go test ./...
+make test-race             # go test -race ./...  (validates port-allocation lock)
 ```
 
 ## Project layout
@@ -145,10 +165,11 @@ make run-agent             # go run ./cmd/agent --master=127.0.0.1:7000 --name=l
 pumpkinPie/
 ├── Makefile
 ├── proto/                 # agent.proto + generated Go code
-├── cmd/
-│   ├── master/main.go     # Master entrypoint
-│   └── agent/main.go      # Agent entrypoint
+├── cmd/pp/main.go         # single entrypoint, dispatches to subcommands
 ├── internal/
+│   ├── cmd/
+│   │   ├── master/        # master subcommand entrypoint
+│   │   └── agent/         # agent subcommand entrypoint
 │   ├── master/
 │   │   ├── store/         # SQLite layer (nodes, containers, port allocation)
 │   │   ├── agentmgr/      # gRPC server, per-agent session, message dispatch

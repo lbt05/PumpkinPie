@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 
@@ -21,20 +23,22 @@ type Server struct {
 	mgr      *agentmgr.Manager
 	proxy    *proxy.Server
 	upgrader websocket.Upgrader
+	lifetime context.Context
 }
 
-func New(s *store.Store, m *agentmgr.Manager, p *proxy.Server) *Server {
+func New(ctx context.Context, s *store.Store, m *agentmgr.Manager, p *proxy.Server) *Server {
 	return &Server{
-		store: s,
-		mgr:   m,
-		proxy: p,
+		store:    s,
+		mgr:      m,
+		proxy:    p,
+		lifetime: ctx,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
 }
 
-func (s *Server) proxyPort() uint32 { return s.proxy.Port() }
+func (s *Server) proxyPort() uint32 { return 0 } // kept for legacy calls; container URL is now per-port
 
 func (s *Server) Engine() *gin.Engine {
 	r := gin.New()
@@ -227,7 +231,7 @@ func (s *Server) createContainer(c *gin.Context) {
 	// Allocate external port (use the first container port's mapping)
 	externalPort := req.ExternalPort
 	if externalPort == 0 && len(ports) > 0 {
-		p, err := s.store.AllocPort(c.Request.Context(), 8000, 9000, containerID)
+		p, err := s.store.AllocPort(c.Request.Context(), 30000, 32767, containerID)
 		if err != nil {
 			c.JSON(500, gin.H{"error": "alloc port: " + err.Error()})
 			return
@@ -261,9 +265,12 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
-	// Register proxy route (path-based: /c/<container_id>/)
-	if len(ports) > 0 {
-		s.proxy.RegisterRoute(containerID, target.ID, ports[0].ContainerPort, externalPort)
+	// Register proxy route and bind the listener for this container's port.
+	if externalPort != 0 && len(ports) > 0 {
+		s.proxy.RegisterRoute(externalPort, containerID, target.ID, ports[0].ContainerPort)
+		if err := s.proxy.BindPort(s.lifetime, externalPort); err != nil {
+			log.Printf("bind proxy port %d failed: %v (container %s)", externalPort, err, containerID)
+		}
 	}
 
 	// Send create command to agent
@@ -292,7 +299,7 @@ func (s *Server) createContainer(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"container":    cc,
 		"node":         gin.H{"id": target.ID, "name": target.Name},
-		"external_url": externalURL(s.proxyPort(), containerID),
+		"external_url": externalURL(externalPort),
 	})
 }
 
@@ -351,7 +358,7 @@ func (s *Server) listContainers(c *gin.Context) {
 			row["ports"] = ports
 		}
 		if cc.ExternalPort != 0 {
-			row["external_url"] = externalURL(s.proxyPort(), cc.ID)
+			row["external_url"] = externalURL(cc.ExternalPort)
 		}
 		out = append(out, row)
 	}
@@ -381,7 +388,7 @@ func (s *Server) deleteContainer(c *gin.Context) {
 		return
 	}
 	if cc.ExternalPort != 0 {
-		s.proxy.UnregisterRoute(cc.ID)
+		s.proxy.UnregisterRoute(cc.ExternalPort)
 		_ = s.store.FreePort(c.Request.Context(), cc.ExternalPort)
 	}
 	_ = s.store.DeleteContainer(c.Request.Context(), id)

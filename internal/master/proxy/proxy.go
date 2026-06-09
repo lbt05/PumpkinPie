@@ -5,41 +5,45 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/pumpkinpie/pumpkinpie/internal/master/agentmgr"
-	"github.com/pumpkinpie/pumpkinpie/internal/master/store"
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
+)
+
+// PortRange is the inclusive range of host ports the master binds for
+// container proxies. 30000-32767 fits in the IANA dynamic/private range
+// and avoids collision with well-known services.
+const (
+	PortRangeMin uint32 = 30000
+	PortRangeMax uint32 = 32767
 )
 
 // Server is a reverse proxy that forwards external HTTP traffic to Docker
 // containers running on remote agents, tunneling bytes through gRPC.
 //
-// URL scheme:  http://<master>:<proxy-port>/c/<container_id>/<path>
-//
-// The proxy server listens on a single port and routes based on the
-// container ID embedded in the URL path. This avoids needing to bind
-// hundreds of ports when many containers are deployed.
+// Each container gets one dedicated port in the configured range. The
+// master opens a fresh net.Listener on demand (when a container is
+// created) and closes it when the container is deleted, so the number of
+// open file descriptors equals the number of running containers — not the
+// size of the port range.
 type Server struct {
-	store *store.Store
-	mgr   *agentmgr.Manager
+	mgr *agentmgr.Manager
 
-	mu       sync.Mutex
-	listener net.Listener
-	port     uint32
+	mu sync.Mutex
 
-	mu2    sync.RWMutex
-	routes map[string]*routeEntry // container_id -> route
-	// back-compat: external_port -> container_id (for the UI's external_url)
-	extPort map[uint32]string
+	// port -> active listener; nil if port is allocated but not yet bound
+	// (shouldn't normally happen, but keeps the map authoritative)
+	listeners map[uint32]net.Listener
+
+	// port -> route (container that owns the port)
+	routes map[uint32]*routeEntry
 }
 
 type routeEntry struct {
@@ -48,130 +52,132 @@ type routeEntry struct {
 	containerPort uint32
 }
 
-func New(s *store.Store, mgr *agentmgr.Manager) *Server {
+func New(mgr *agentmgr.Manager) *Server {
 	return &Server{
-		store:    s,
-		mgr:      mgr,
-		routes:   make(map[string]*routeEntry),
-		extPort:  make(map[uint32]string),
+		mgr:       mgr,
+		listeners: make(map[uint32]net.Listener),
+		routes:    make(map[uint32]*routeEntry),
 	}
 }
 
-// Start binds to a port and serves HTTP traffic routed to containers.
-func (s *Server) Start(ctx context.Context, port uint32) (uint32, error) {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+// AllocatePort reserves a free port in [PortRangeMin, PortRangeMax].
+// Returns 0 if no port is free.
+func (s *Server) AllocatePort() uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for p := PortRangeMin; p <= PortRangeMax; p++ {
+		if _, used := s.routes[p]; used {
+			continue
+		}
+		return p
+	}
+	return 0
+}
+
+// BindPort opens a net.Listener on the given port and starts serving
+// HTTP traffic for it. Must be called once per allocated port.
+func (s *Server) BindPort(ctx context.Context, port uint32) error {
+	s.mu.Lock()
+	if _, exists := s.listeners[port]; exists {
+		s.mu.Unlock()
+		return fmt.Errorf("port %d already bound", port)
+	}
+	s.mu.Unlock()
+
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
+	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("listen :%d: %w", port, err)
 	}
 	actual := uint32(ln.Addr().(*net.TCPAddr).Port)
+
 	s.mu.Lock()
-	s.listener = ln
-	s.port = actual
+	s.listeners[actual] = ln
 	s.mu.Unlock()
-	s.loadExistingRoutes(ctx)
 
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
 	}()
+
+	srv := &http.Server{
+		Handler:           http.HandlerFunc(s.makeHandler(actual)),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
-		srv := &http.Server{
-			Handler:           http.HandlerFunc(s.handle),
-			ReadHeaderTimeout: 10 * time.Second,
-		}
+		log.Printf("proxy: bound :%d", actual)
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("proxy serve: %v", err)
+			log.Printf("proxy: serve :%d: %v", actual, err)
 		}
 	}()
-	log.Printf("proxy listening on :%d (URL scheme: /c/<container_id>/...)", actual)
-	return actual, nil
+	return nil
 }
 
-func (s *Server) Port() uint32 {
+func (s *Server) makeHandler(port uint32) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		rt, ok := s.routes[port]
+		s.mu.Unlock()
+		if !ok {
+			http.Error(w, fmt.Sprintf("no container routed to port %d", port), 404)
+			return
+		}
+		sess := s.mgr.Get(rt.nodeID)
+		if sess == nil {
+			http.Error(w, "node offline", 502)
+			return
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "hijacking not supported", 500)
+			return
+		}
+		clientConn, _, err := hj.Hijack()
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		go s.bridge(clientConn, sess, rt, r)
+	}
+}
+
+// RegisterRoute stores the route for a port. Caller must have already
+// allocated the port and called BindPort.
+func (s *Server) RegisterRoute(port uint32, containerID, nodeID string, containerPort uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.port
-}
-
-func (s *Server) loadExistingRoutes(ctx context.Context) {
-	cs, err := s.store.ListContainers(ctx)
-	if err != nil {
-		return
-	}
-	for _, c := range cs {
-		if c.PortsJSON == "" {
-			continue
-		}
-		ports, _ := parsePorts(c.PortsJSON)
-		if len(ports) == 0 {
-			continue
-		}
-		s.RegisterRoute(c.ID, c.NodeID, ports[0].ContainerPort, c.ExternalPort)
-	}
-}
-
-// RegisterRoute stores a route. externalPort may be 0 (no public URL hint).
-func (s *Server) RegisterRoute(containerID, nodeID string, containerPort, externalPort uint32) {
-	s.mu2.Lock()
-	defer s.mu2.Unlock()
-	s.routes[containerID] = &routeEntry{
+	s.routes[port] = &routeEntry{
 		containerID:   containerID,
 		nodeID:        nodeID,
 		containerPort: containerPort,
 	}
-	if externalPort != 0 {
-		s.extPort[externalPort] = containerID
-	}
-	log.Printf("proxy: container %s on node %s (port %d) -> externalPort=%d", containerID, nodeID, containerPort, externalPort)
+	log.Printf("proxy: route :%d -> container %s on node %s (port %d)", port, containerID, nodeID, containerPort)
 }
 
-func (s *Server) UnregisterRoute(containerID string) {
-	s.mu2.Lock()
-	defer s.mu2.Unlock()
-	delete(s.routes, containerID)
-	for p, c := range s.extPort {
-		if c == containerID {
-			delete(s.extPort, p)
-		}
+// UnregisterRoute removes the route and closes the listener for the port.
+// Returns the port that was freed (or 0 if not registered).
+func (s *Server) UnregisterRoute(port uint32) uint32 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.routes, port)
+	if ln, ok := s.listeners[port]; ok {
+		_ = ln.Close()
+		delete(s.listeners, port)
+		log.Printf("proxy: released :%d", port)
 	}
+	return port
 }
 
-func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
-	// Path: /c/<container_id>[/<rest>]
-	parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/"), "/", 3)
-	if len(parts) < 2 || parts[0] != "c" {
-		http.Error(w, "expected /c/<container_id>/...", 404)
-		return
+// LoadExistingRoute registers a route at master startup from persisted
+// metadata, but does not bind the port (caller should BindPort).
+func (s *Server) LoadExistingRoute(port uint32, containerID, nodeID string, containerPort uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.routes[port] = &routeEntry{
+		containerID:   containerID,
+		nodeID:        nodeID,
+		containerPort: containerPort,
 	}
-	cid := parts[1]
-	s.mu2.RLock()
-	rt, ok := s.routes[cid]
-	s.mu2.RUnlock()
-	if !ok {
-		http.Error(w, fmt.Sprintf("no route for container %s", cid), 404)
-		return
-	}
-	sess := s.mgr.Get(rt.nodeID)
-	if sess == nil {
-		http.Error(w, "node offline", 502)
-		return
-	}
-	// Rewrite the path to strip /c/<id> prefix so the container sees the
-	// original path it was started with.
-	r.URL.Path = "/" + parts[2]
-	r.RequestURI = ""
-
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		http.Error(w, "hijacking not supported", 500)
-		return
-	}
-	clientConn, _, err := hj.Hijack()
-	if err != nil {
-		http.Error(w, err.Error(), 500)
-		return
-	}
-	go s.bridge(clientConn, sess, rt, r)
 }
 
 func (s *Server) bridge(clientConn net.Conn, sess *agentmgr.Session, rt *routeEntry, r *http.Request) {
@@ -197,6 +203,9 @@ func (s *Server) bridge(clientConn net.Conn, sess *agentmgr.Session, rt *routeEn
 		return
 	}
 
+	// Serialize the parsed request (line + headers + body) to a buffer
+	// to send over the gRPC tunnel. r.Write handles Content-Length or
+	// chunked encoding for the body.
 	var reqBuf []byte
 	bw := bufio.NewWriter(byteSliceWriter{&reqBuf})
 	if err := r.Write(bw); err != nil {
@@ -263,17 +272,4 @@ type byteSliceWriter struct{ buf *[]byte }
 func (w byteSliceWriter) Write(p []byte) (int, error) {
 	*w.buf = append(*w.buf, p...)
 	return len(p), nil
-}
-
-type portMappingJSON struct {
-	ContainerPort uint32 `json:"container_port"`
-	Protocol      string `json:"protocol"`
-}
-
-func parsePorts(s string) ([]portMappingJSON, error) {
-	var out []portMappingJSON
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		return nil, err
-	}
-	return out, nil
 }

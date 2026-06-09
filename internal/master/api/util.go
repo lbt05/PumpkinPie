@@ -4,7 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
+	"strconv"
 
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
 )
@@ -15,8 +15,8 @@ func newContainerID() string {
 	return "c-" + hex.EncodeToString(b[:])
 }
 
-func externalURL(proxyPort uint32, containerID string) string {
-	return fmt.Sprintf("http://localhost:%d/c/%s/", proxyPort, containerID)
+func externalURL(port uint32) string {
+	return "http://localhost:" + strconv.FormatUint(uint64(port), 10) + "/"
 }
 
 type portMappingJSON struct {
