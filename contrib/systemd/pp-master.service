@@ -1,0 +1,45 @@
+[Unit]
+Description=pumpkinPie master (UI + API + gRPC + reverse proxy)
+Documentation=https://github.com/pumpkinpie/pumpkinpie
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pp
+Group=pp
+# Adjust ExecStart flags to your environment. See `pp master -h` for all options.
+ExecStart=/usr/local/bin/pp master \
+  --http=0.0.0.0:8080 \
+  --grpc=0.0.0.0:7000 \
+  --db=/var/lib/pp/pp.db
+WorkingDirectory=/var/lib/pp
+
+# Hardening: drop privileges and isolate the process as much as possible
+# without breaking the SQLite + Docker-proxy functionality.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtimeScheduling=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pp-master
+
+[Install]
+WantedBy=multi-user.target

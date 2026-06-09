@@ -4,7 +4,7 @@ import path from 'node:path'
 
 export default defineConfig({
   plugins: [vue()],
-  base: '/ui/',
+  base: '/console/',
   resolve: {
     alias: { '@': path.resolve(__dirname, 'src') },
   },

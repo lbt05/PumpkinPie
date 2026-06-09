@@ -1,0 +1,52 @@
+[Unit]
+Description=pumpkinPie agent (node agent: reports metrics + hosts containers)
+Documentation=https://github.com/pumpkinpie/pumpkinpie
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+# The agent must run as root (or a user in the docker group) to access
+# the Docker socket. Change the socket path with DOCKER_SOCK=... if needed.
+Environment=DOCKER_SOCK=/var/run/docker.sock
+# Override the node name to something unique per host, e.g. via hostnamectl.
+ExecStart=/usr/local/bin/pp agent \
+  --master=pp-master.internal:7000 \
+  --name=%H
+WorkingDirectory=/var/lib/pp
+
+# The agent connects outbound to the master and is reachable from the
+# master for proxy tunnels, but it does NOT need to listen on a public
+# port. Restrict networking to only the master address.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Hardening (less aggressive than master because we need Docker access)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtimeScheduling=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+
+# Restart policy: agents should reconnect aggressively on master outage
+Restart=always
+RestartSec=5s
+StartLimitIntervalSec=60
+StartLimitBurst=10
+TimeoutStopSec=15s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pp-agent
+
+[Install]
+WantedBy=multi-user.target

@@ -15,7 +15,7 @@ tunneled over gRPC to the right node.
                     ┌────────────────▼─────────────────┐
                     │  Master (Go + Gin)               │
                     │   - /api REST                    │
-                    │   - /ui  built-in dashboard      │
+                    │   - /console  built-in dashboard │
                     │   - reverse-proxy  →  gRPC tunnel│
                     │   - SQLite                       │
                     └────────────────┬─────────────────┘
@@ -64,7 +64,7 @@ The master does not expose a single "proxy port" — every container
 created on the cluster gets its own dedicated port in the range
 **30000-32767** (see "Reverse-proxy URL scheme" below).
 
-Open <http://localhost:8080/ui/> in your browser.
+Open <http://localhost:8080/console/> in your browser.
 
 ### 3. Start one or more Agents (on any machine with Docker)
 
@@ -150,6 +150,101 @@ tunnel to the owning node, and pipes bytes both ways.
   Docker Engine API over the unix socket — no SDK churn, no cgo.
 - **GPU detection** uses `nvidia-smi` (works with the NVIDIA container
   toolkit); on hosts without an NVIDIA GPU the field stays at 0.
+
+## Running as a systemd service
+
+Production deployments should run `pp master` and `pp agent` under
+systemd so they auto-start on boot and recover from crashes. Two unit
+files are provided in [`contrib/systemd/`](contrib/systemd/):
+
+| File | Purpose |
+|---|---|
+| `pp-master.service` | Central control plane (UI + API + gRPC + reverse proxy) |
+| `pp-agent.service`  | Node agent (registers to master, hosts containers) |
+| `install.sh`        | One-shot installer that renders the units and starts them |
+| `uninstall.sh`      | Stop and remove the units |
+
+### 1. Build and install the binary
+
+```bash
+make build
+sudo cp bin/pp /usr/local/bin/pp
+```
+
+### 2. Install on the master host
+
+```bash
+sudo PP_MASTER_ADDR=10.0.0.1:7000 ./contrib/systemd/install.sh master
+```
+
+This will:
+- create a system user `pp` (if missing)
+- create `/var/lib/pp/` for the SQLite database
+- render `pp-master.service` with the right paths
+- `enable` and `start` it
+
+The UI is now reachable at <http://10.0.0.1:8080/console/>.
+
+### 3. Install on every worker host
+
+```bash
+sudo PP_MASTER_ADDR=10.0.0.1:7000 ./contrib/systemd/install.sh agent
+```
+
+The agent runs as `root` because it needs to access the Docker socket.
+It connects to the master outbound, so no inbound ports need to be
+opened on the worker firewall.
+
+If your Docker socket is not at `/var/run/docker.sock` (rootless Docker,
+macOS, custom path), edit the unit's `Environment=DOCKER_SOCK=...` line
+and `systemctl daemon-reload && systemctl restart pp-agent`.
+
+### 4. Day-to-day operations
+
+```bash
+# Status
+sudo systemctl status pp-master
+sudo systemctl status pp-agent
+
+# Logs (follow)
+sudo journalctl -u pp-master -f
+sudo journalctl -u pp-agent -f
+
+# Logs since last boot
+sudo journalctl -u pp-agent -b
+
+# Restart
+sudo systemctl restart pp-master
+
+# Disable autostart (but keep installed)
+sudo systemctl disable pp-agent
+```
+
+### 5. Uninstall
+
+```bash
+sudo ./contrib/systemd/uninstall.sh        # removes both
+# or
+sudo ./contrib/systemd/uninstall.sh agent  # removes only the agent
+```
+
+The data directory and the `pp` user are **not** removed automatically —
+see the script's output for cleanup hints.
+
+### Customizing the units
+
+The shipped units enable most of systemd's hardening options
+(`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`,
+`MemoryDenyWriteExecute`, etc.). If a unit fails to start because of a
+denied syscall or filesystem access, look at
+`journalctl -xeu pp-<role>` first. Common tweaks:
+
+- **`ProtectSystem=strict` blocks the master from writing outside
+  `ReadWritePaths=`** — add any extra data dir to `ReadWritePaths=`.
+- **`MemoryDenyWriteExecute=true` blocks JITs** — pumpkinPie doesn't
+  use one, so leave it on; if you add Go plugins later, drop it.
+- **`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`** on the agent
+  prevents the process from binding to other sockets; safe to keep.
 
 ## Development
 

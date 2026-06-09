@@ -30,6 +30,22 @@ test:
 test-race:
 	$(GO) test -race ./...
 
+.PHONY: install
+install: build
+	install -m 0755 bin/pp $(DESTDIR)/usr/local/bin/pp
+
+.PHONY: install-systemd-master
+install-systemd-master: install
+	sudo PP_BIN=/usr/local/bin/pp contrib/systemd/install.sh master
+
+.PHONY: install-systemd-agent
+install-systemd-agent: install
+	sudo PP_BIN=/usr/local/bin/pp contrib/systemd/install.sh agent
+
+.PHONY: uninstall-systemd
+uninstall-systemd:
+	sudo contrib/systemd/uninstall.sh
+
 .PHONY: build
 build:
 	$(GO) build -o bin/pp ./cmd/pp

@@ -62,9 +62,9 @@ func (s *Server) Engine() *gin.Engine {
 
 	r.GET("/api/ws", s.websocket)
 
-	// serve built frontend under /ui/ (Vite base)
-	r.StaticFS("/ui", http.Dir("./web/dist"))
-	r.GET("/ui", func(c *gin.Context) { c.Redirect(302, "/ui/") })
+	// serve built frontend under /console (Vite base)
+	r.StaticFS("/console", http.Dir("./web/dist"))
+	r.GET("/console", func(c *gin.Context) { c.Redirect(302, "/console/") })
 	r.NoRoute(func(c *gin.Context) {
 		// SPA fallback: only for non-API, non-asset paths
 		p := c.Request.URL.Path
