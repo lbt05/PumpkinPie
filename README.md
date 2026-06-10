@@ -45,10 +45,98 @@ tunneled over gRPC to the right node.
 
 ## Quick start
 
+### 0. Install build dependencies
+
+You only need these on the machine where you build (the master binary
+itself is static and has no runtime deps other than the Linux kernel +
+Docker on agent hosts).
+
+**Required on every platform:**
+- **Go 1.23+** — <https://go.dev/dl/>
+- **Node.js 20+ and npm** — <https://nodejs.org/>
+- **Docker** — only on machines that will run `pp agent`
+
+**Required only to regenerate proto** (you can skip this if you don't
+plan to edit `proto/agent.proto`; `make build` and `make all` work fine
+without it because generated files are committed):
+- `protoc` (protobuf compiler)
+- `protoc-gen-go` and `protoc-gen-go-grpc` (Go gRPC plugins)
+
+Install `protoc` for your OS:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+# RHEL / Fedora / Rocky
+sudo dnf install -y protobuf-compiler
+
+# Alpine
+sudo apk add --no-cache protoc
+
+# macOS
+brew install protobuf
+
+# Arch
+sudo pacman -S protobuf
+```
+
+Install the Go plugins (host Go, so they go in `$GOBIN`):
+
+```bash
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+# make sure $GOBIN (or $(go env GOPATH)/bin) is on $PATH
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+Verify the toolchain:
+
+```bash
+go version          # go1.23+
+node --version      # v20+
+protoc --version    # libprotoc 3.x+
+which protoc-gen-go protoc-gen-go-grpc
+```
+
+**Install Docker** (only on machines that will run `pp agent`):
+
+```bash
+# Debian / Ubuntu — see https://docs.docker.com/engine/install/
+curl -fsSL https://get.docker.com | sudo sh
+sudo usermod -aG docker $USER   # log out and back in
+
+# RHEL / Fedora
+sudo dnf install -y docker docker-compose-plugin
+sudo systemctl enable --now docker
+
+# macOS — install Docker Desktop from https://docker.com/products/docker-desktop/
+```
+
+If you are behind a firewall and `npm install` is slow, point npm at a
+mirror first:
+
+```bash
+npm config set registry https://registry.npmmirror.com
+```
+
 ### 1. Build everything
 
 ```bash
 make all           # generates proto, builds web/dist, builds bin/pp
+```
+
+`make all` will:
+1. Run `make proto` — only if `protoc` is on `PATH`. If you skipped
+   step 0, the committed generated code is used and this step is a no-op.
+2. Run `go mod download` (implicit) and compile `bin/pp`.
+3. Run `npm ci` in `web/` and produce `web/dist/`.
+
+If you only want the Go binary (no UI bundle):
+
+```bash
+make build         # just bin/pp
 ```
 
 ### 2. Start the Master
@@ -93,7 +181,7 @@ DOCKER_HOST=tcp://docker-host:2375 ./bin/pp agent --master=... --name=node-A
 Within ~5 seconds the node cards should appear in the dashboard with live
 metrics.
 
-### 5. Subcommands
+### Subcommands
 
 `pp` is a single binary that runs as either role:
 
