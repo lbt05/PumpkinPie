@@ -32,6 +32,8 @@ export type Node = {
   mem_total_bytes: number
   load1: number
   gpu_count: number
+  gpu_used?: number
+  gpu_free?: number
   gpu_mem_used_bytes: number
   gpu_mem_total_bytes: number
   gpu_usage_percent: number
@@ -54,6 +56,7 @@ export type Container = {
   cpu_cores: number
   memory_bytes: number
   gpu_count: number
+  gpu_indices?: number[]
   external_port: number
   external_url?: string
   env?: string[]
@@ -66,6 +69,19 @@ export type Container = {
 export async function listNodes() {
   const r = await api.get<{ nodes: Node[] }>('/nodes')
   return r.data.nodes
+}
+
+export type NodeGPUDevice = {
+  index: number
+  name?: string
+  uuid?: string
+  mem_total_bytes?: number
+  held_by: { container_id: string; container_name?: string } | null
+}
+
+export async function listNodeGPUs(id: string) {
+  const r = await api.get<{ gpus: NodeGPUDevice[] }>(`/nodes/${id}/gpus`)
+  return r.data.gpus
 }
 export async function listContainers() {
   const r = await api.get<{ containers: Container[] }>('/containers')
@@ -81,6 +97,7 @@ export type CreateContainerPayload = {
   cpu_cores?: number
   memory_bytes?: number
   gpu_count?: number
+  gpu_indices?: number[]
   node_id?: string
   pull?: boolean
   external_port?: number

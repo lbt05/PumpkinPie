@@ -192,6 +192,91 @@ container.
 Under the hood, the Master hijacks the HTTP connection, opens a gRPC
 tunnel to the owning node, and pipes bytes both ways.
 
+## Enabling GPUs on a node
+
+GPU containers in pumpkinPie use Docker's `--gpus` machinery, which
+needs the NVIDIA Container Toolkit installed and registered with the
+Docker daemon on each GPU node.
+
+### Host setup (per GPU host, Linux)
+
+1. **NVIDIA driver** — `apt install nvidia-driver-535` (or the version
+   your GPU needs), then reboot. Verify with `nvidia-smi`.
+
+2. **NVIDIA Container Toolkit:**
+   ```bash
+   curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+     | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+   curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+     | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+     | sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+   sudo apt update && sudo apt install -y nvidia-container-toolkit
+   ```
+
+3. **Register the runtime with Docker:**
+   ```bash
+   sudo nvidia-ctk runtime configure --runtime=docker
+   sudo systemctl restart docker
+   ```
+
+4. **Smoke test** the toolkit before relying on pumpkinPie:
+   ```bash
+   docker run --rm --gpus all nvidia/cuda:12.3.0-base-ubuntu22.04 nvidia-smi
+   ```
+   You should see the GPU table printed from inside the container.
+   If it fails (e.g. `could not select device driver "" with capabilities: [[gpu]]`),
+   the toolkit is not wired into Docker correctly — re-run step 3.
+
+### How pumpkinPie schedules GPUs
+
+- **Discovery** — the agent runs `nvidia-smi` every metrics interval
+  and reports per-device usage/memory to the master. Hosts without
+  `nvidia-smi` report zero GPUs.
+- **Exclusive reservation** — the master keeps a `gpu_alloc` table
+  with a composite primary key on `(node_id, gpu_index)`. When you
+  create a container with `gpu_count: 2`, the master picks the lowest
+  two free indices, persists the reservation, and sends them to the
+  agent as `DeviceIDs` in the Docker `DeviceRequests` payload. The
+  daemon then attaches exactly those GPUs to the container.
+- **No accidental sharing** — a second container that asks for a GPU
+  on the same node is scheduled onto a different node (or rejected if
+  none has enough free GPUs). The rejection error lists how many
+  online nodes were inspected and how many had enough free devices,
+  so you can tell the difference between "all GPUs busy" and "all
+  nodes offline".
+- **Stopped containers release their GPUs** so other workloads can
+  use them. Restarting a stopped container will try to re-reserve the
+  exact same indices it was created with; if any of those are now
+  held by another container, `POST /api/containers/:id/start` returns
+  HTTP 409 and you'll need to delete + recreate the container to get
+  a fresh assignment.
+- **Failed creates release their GPUs** automatically — if the agent
+  reports `ContainerCreated.error` (e.g. image pull failed, GPU runtime
+  missing), the master frees the reservation so other containers can
+  pick those devices up.
+
+### What you'll see in the UI
+
+- The **Nodes** page shows `2 / 4 GPU free` per node instead of just the
+  total count.
+- The **Containers** table appends `· GPU 0, 2` to the Resources column
+  for each container holding GPUs.
+- The **New Container** form's `GPU count` field is unchanged — the
+  master always picks indices on your behalf. Pin to a specific node
+  if you care which physical host runs it.
+
+### Limits / known gaps
+
+- **No MIG / time-slicing support** — each physical GPU is treated as
+  one indivisible unit. If you've configured the toolkit to advertise
+  N replicas of a GPU, `nvidia-smi -L` will report each replica as a
+  separate device and pp will treat them independently.
+- **No CUDA-version or compute-capability filtering** — `gpu_count` is
+  a number, not a constraint on device capability. Use node-pinning if
+  you need to target specific hardware.
+- **No memory-MB constraint** — you can't request "a GPU with ≥24 GB
+  free". Reservations are purely by device count.
+
 ## Architecture notes
 
 - **gRPC bidirectional stream** carries both directions of traffic on one

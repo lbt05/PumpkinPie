@@ -1,15 +1,29 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { fmtBytes, fmtTime, listNodes, type Node } from '@/api/client'
+import { fmtBytes, fmtTime, listNodes, listNodeGPUs, type Node, type NodeGPUDevice } from '@/api/client'
 
 const { t } = useI18n()
 const nodes = ref<Node[]>([])
+const gpuAllocs = ref<Record<string, NodeGPUDevice[]>>({})
 let timer: number | undefined
 
 async function refresh() {
   try {
     nodes.value = await listNodes()
+    const next: Record<string, NodeGPUDevice[]> = {}
+    await Promise.all(
+      nodes.value
+        .filter((n) => (n.gpu_count || 0) > 0 && n.state === 'online')
+        .map(async (n) => {
+          try {
+            next[n.id] = await listNodeGPUs(n.id)
+          } catch (e) {
+            console.warn('gpu fetch', n.id, e)
+          }
+        }),
+    )
+    gpuAllocs.value = next
   } catch (e) {
     console.warn(e)
   }
@@ -25,6 +39,13 @@ const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
 
 function stateLabel(s: string) {
   return t(`state.${s}` as any, s)
+}
+
+function heldBy(nodeID: string, index: number): { container_name?: string; container_id: string } | undefined {
+  const devs = gpuAllocs.value[nodeID]
+  if (!devs) return undefined
+  const d = devs.find((d) => d.index === index)
+  return d?.held_by || undefined
 }
 </script>
 
@@ -92,7 +113,7 @@ function stateLabel(s: string) {
               {{ n.gpu_count > 0 ? n.gpu_usage_percent.toFixed(1)+'%' : t('common.none') }}
             </div>
             <div v-if="n.gpu_count > 0" style="font-size:11px;color:var(--text-dim);margin-top:4px;">
-              {{ n.gpu_count }} GPU · {{ fmtBytes(n.gpu_mem_used_bytes) }} / {{ fmtBytes(n.gpu_mem_total_bytes) }}
+              {{ t('nodes.gpuFreeOfTotal', { free: (n.gpu_free ?? n.gpu_count), total: n.gpu_count }) }} · {{ fmtBytes(n.gpu_mem_used_bytes) }} / {{ fmtBytes(n.gpu_mem_total_bytes) }}
             </div>
           </div>
         </div>
@@ -119,8 +140,12 @@ function stateLabel(s: string) {
               <span>{{ g.usage_percent.toFixed(1) }}%</span>
             </div>
             <div class="metric-bar"><span :style="{ width: Math.min(g.usage_percent,100)+'%', background: 'linear-gradient(90deg,#ab47bc,#ff8a3d)' }"></span></div>
-            <div style="font-size:10px;color:var(--text-dim);">
-              {{ fmtBytes(g.mem_used_bytes) }} / {{ fmtBytes(g.mem_total_bytes) }}
+            <div style="font-size:10px;color:var(--text-dim);display:flex;justify-content:space-between;gap:8px;">
+              <span>{{ fmtBytes(g.mem_used_bytes) }} / {{ fmtBytes(g.mem_total_bytes) }}</span>
+              <span v-if="heldBy(n.id, g.index)" style="color:var(--accent);">
+                {{ t('nodes.gpuHeldBy', { name: heldBy(n.id, g.index)?.container_name || heldBy(n.id, g.index)?.container_id }) }}
+              </span>
+              <span v-else style="color:var(--text-dim);">{{ t('nodes.gpuFreeLabel') }}</span>
             </div>
           </div>
         </div>

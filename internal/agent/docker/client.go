@@ -16,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -144,10 +145,19 @@ func (c *Client) Create(ctx context.Context, cmd *pb.CreateContainerCommand) (st
 			host["Memory"] = int64(cmd.Resources.MemoryBytes)
 		}
 		if cmd.Resources.GpuCount > 0 {
-			host["DeviceRequests"] = []map[string]any{{
-				"Count":        int(cmd.Resources.GpuCount),
+			req := map[string]any{
 				"Capabilities": [][]string{{"gpu"}},
-			}}
+			}
+			if len(cmd.Resources.GpuDeviceIds) > 0 {
+				ids := make([]string, len(cmd.Resources.GpuDeviceIds))
+				for i, idx := range cmd.Resources.GpuDeviceIds {
+					ids[i] = strconv.Itoa(int(idx))
+				}
+				req["DeviceIDs"] = ids
+			} else {
+				req["Count"] = int(cmd.Resources.GpuCount)
+			}
+			host["DeviceRequests"] = []map[string]any{req}
 		}
 	}
 

@@ -123,3 +123,10 @@ func asProto(in []portMappingJSON) []*pb.PortMapping {
 	}
 	return out
 }
+
+func freeGPUsForRow(total, used uint32) uint32 {
+	if used >= total {
+		return 0
+	}
+	return total - used
+}

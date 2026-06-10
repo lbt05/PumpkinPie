@@ -3,11 +3,19 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
+)
+
+// Sentinel errors for GPU allocation.
+var (
+	ErrInsufficientGPUs = errors.New("insufficient free GPUs on node")
+	ErrGPUTaken         = errors.New("requested GPU index is already allocated")
 )
 
 type Store struct {
@@ -42,27 +50,28 @@ type Node struct {
 }
 
 type Container struct {
-	ID            string    `json:"id"`
-	NodeID        string    `json:"node_id"`
-	DockerID      string    `json:"docker_id"`
-	Name          string    `json:"name"`
-	Image         string    `json:"image"`
-	State         string    `json:"state"`
-	Status        string    `json:"status"`
-	EnvJSON       string    `json:"-"`
-	CmdJSON       string    `json:"-"`
-	PortsJSON     string    `json:"-"`
-	VolumeBinds   string    `json:"-"`
-	CPUCores      float64   `json:"cpu_cores"`
-	MemoryBytes   uint64    `json:"memory_bytes"`
-	GPUCount      uint32    `json:"gpu_count"`
-	ExternalPort  uint32    `json:"external_port"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID             string    `json:"id"`
+	NodeID         string    `json:"node_id"`
+	DockerID       string    `json:"docker_id"`
+	Name           string    `json:"name"`
+	Image          string    `json:"image"`
+	State          string    `json:"state"`
+	Status         string    `json:"status"`
+	EnvJSON        string    `json:"-"`
+	CmdJSON        string    `json:"-"`
+	PortsJSON      string    `json:"-"`
+	VolumeBinds    string    `json:"-"`
+	CPUCores       float64   `json:"cpu_cores"`
+	MemoryBytes    uint64    `json:"memory_bytes"`
+	GPUCount       uint32    `json:"gpu_count"`
+	GPUIndicesJSON string    `json:"-"`
+	ExternalPort   uint32    `json:"external_port"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)")
 	if err != nil {
 		return nil, err
 	}
@@ -104,26 +113,38 @@ CREATE INDEX IF NOT EXISTS idx_nodes_state ON nodes(state);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_machine_id ON nodes(machine_id) WHERE machine_id <> '';
 
 CREATE TABLE IF NOT EXISTS containers (
-	id              TEXT PRIMARY KEY,
-	node_id         TEXT NOT NULL,
-	docker_id       TEXT,
-	name            TEXT,
-	image           TEXT NOT NULL,
-	state           TEXT,
-	status          TEXT,
-	env_json        TEXT,
-	cmd_json        TEXT,
-	ports_json      TEXT,
-	volume_binds    TEXT,
-	cpu_cores       REAL DEFAULT 0,
-	memory_bytes    INTEGER DEFAULT 0,
-	gpu_count       INTEGER DEFAULT 0,
-	external_port   INTEGER,
-	created_at      DATETIME NOT NULL,
-	updated_at      DATETIME NOT NULL,
+	id                TEXT PRIMARY KEY,
+	node_id           TEXT NOT NULL,
+	docker_id         TEXT,
+	name              TEXT,
+	image             TEXT NOT NULL,
+	state             TEXT,
+	status            TEXT,
+	env_json          TEXT,
+	cmd_json          TEXT,
+	ports_json        TEXT,
+	volume_binds      TEXT,
+	cpu_cores         REAL DEFAULT 0,
+	memory_bytes      INTEGER DEFAULT 0,
+	gpu_count         INTEGER DEFAULT 0,
+	gpu_indices_json  TEXT NOT NULL DEFAULT '',
+	external_port     INTEGER,
+	created_at        DATETIME NOT NULL,
+	updated_at        DATETIME NOT NULL,
 	FOREIGN KEY(node_id) REFERENCES nodes(id)
 );
 CREATE INDEX IF NOT EXISTS idx_containers_node ON containers(node_id);
+
+CREATE TABLE IF NOT EXISTS gpu_alloc (
+	node_id       TEXT NOT NULL,
+	gpu_index     INTEGER NOT NULL,
+	container_id  TEXT NOT NULL,
+	allocated_at  DATETIME NOT NULL,
+	PRIMARY KEY (node_id, gpu_index),
+	FOREIGN KEY (container_id) REFERENCES containers(id) ON DELETE CASCADE,
+	FOREIGN KEY (node_id)      REFERENCES nodes(id)
+);
+CREATE INDEX IF NOT EXISTS idx_gpu_alloc_container ON gpu_alloc(container_id);
 
 CREATE TABLE IF NOT EXISTS port_alloc (
 	port            INTEGER PRIMARY KEY,
@@ -255,10 +276,12 @@ func (s *Store) InsertContainer(ctx context.Context, c *Container) error {
 	c.UpdatedAt = now
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO containers (id, node_id, docker_id, name, image, state, status, env_json, cmd_json,
-	ports_json, volume_binds, cpu_cores, memory_bytes, gpu_count, external_port, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	ports_json, volume_binds, cpu_cores, memory_bytes, gpu_count, gpu_indices_json,
+	external_port, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.NodeID, c.DockerID, c.Name, c.Image, c.State, c.Status, c.EnvJSON, c.CmdJSON,
-		c.PortsJSON, c.VolumeBinds, c.CPUCores, c.MemoryBytes, c.GPUCount, c.ExternalPort, c.CreatedAt, c.UpdatedAt)
+		c.PortsJSON, c.VolumeBinds, c.CPUCores, c.MemoryBytes, c.GPUCount, c.GPUIndicesJSON,
+		c.ExternalPort, c.CreatedAt, c.UpdatedAt)
 	return err
 }
 
@@ -287,7 +310,8 @@ func (s *Store) DeleteContainer(ctx context.Context, id string) error {
 func (s *Store) ListContainers(ctx context.Context) ([]*Container, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, docker_id, name, image, state, status,
 		env_json, cmd_json, ports_json, volume_binds, cpu_cores, memory_bytes, gpu_count,
-		external_port, created_at, updated_at FROM containers ORDER BY created_at DESC`)
+		COALESCE(gpu_indices_json, ''), external_port, created_at, updated_at
+		FROM containers ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +321,7 @@ func (s *Store) ListContainers(ctx context.Context) ([]*Container, error) {
 		c := &Container{}
 		if err := rows.Scan(&c.ID, &c.NodeID, &c.DockerID, &c.Name, &c.Image, &c.State, &c.Status,
 			&c.EnvJSON, &c.CmdJSON, &c.PortsJSON, &c.VolumeBinds, &c.CPUCores, &c.MemoryBytes, &c.GPUCount,
-			&c.ExternalPort, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.GPUIndicesJSON, &c.ExternalPort, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -308,7 +332,8 @@ func (s *Store) ListContainers(ctx context.Context) ([]*Container, error) {
 func (s *Store) GetContainer(ctx context.Context, id string) (*Container, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, docker_id, name, image, state, status,
 		env_json, cmd_json, ports_json, volume_binds, cpu_cores, memory_bytes, gpu_count,
-		external_port, created_at, updated_at FROM containers WHERE id=?`, id)
+		COALESCE(gpu_indices_json, ''), external_port, created_at, updated_at
+		FROM containers WHERE id=?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -319,8 +344,17 @@ func (s *Store) GetContainer(ctx context.Context, id string) (*Container, error)
 	c := &Container{}
 	err = rows.Scan(&c.ID, &c.NodeID, &c.DockerID, &c.Name, &c.Image, &c.State, &c.Status,
 		&c.EnvJSON, &c.CmdJSON, &c.PortsJSON, &c.VolumeBinds, &c.CPUCores, &c.MemoryBytes, &c.GPUCount,
-		&c.ExternalPort, &c.CreatedAt, &c.UpdatedAt)
+		&c.GPUIndicesJSON, &c.ExternalPort, &c.CreatedAt, &c.UpdatedAt)
 	return c, err
+}
+
+// UpdateContainerGPUIndices replaces the persisted indices for a container.
+func (s *Store) UpdateContainerGPUIndices(ctx context.Context, id, indicesJSON string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `UPDATE containers SET gpu_indices_json=?, updated_at=? WHERE id=?`,
+		indicesJSON, time.Now().UTC(), id)
+	return err
 }
 
 // ---------- Port allocation ----------
@@ -367,4 +401,188 @@ func (s *Store) FreePort(ctx context.Context, port uint32) error {
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx, `DELETE FROM port_alloc WHERE port=?`, port)
 	return err
+}
+
+// ---------- GPU allocation ----------
+
+// AllocGPUs picks `count` lowest-numbered free GPU indices on nodeID and
+// reserves them for containerID. Returns the chosen indices in ascending
+// order. If fewer than `count` are free, returns ErrInsufficientGPUs and
+// reserves none. Atomic via PK(node_id, gpu_index): concurrent callers
+// racing for the same indices get a UNIQUE-constraint failure and roll back.
+func (s *Store) AllocGPUs(ctx context.Context, nodeID, containerID string, count int, total uint32) ([]uint32, error) {
+	if count <= 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	used, err := readUsedIndices(ctx, tx, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	chosen := make([]uint32, 0, count)
+	for i := uint32(0); i < total && len(chosen) < count; i++ {
+		if !used[i] {
+			chosen = append(chosen, i)
+		}
+	}
+	if len(chosen) < count {
+		return nil, fmt.Errorf("%w: requested %d, %d free of %d", ErrInsufficientGPUs, count, len(chosen), total)
+	}
+	now := time.Now().UTC()
+	for _, idx := range chosen {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO gpu_alloc(node_id, gpu_index, container_id, allocated_at) VALUES(?, ?, ?, ?)`,
+			nodeID, idx, containerID, now); err != nil {
+			if isUniqueViolation(err) {
+				return nil, fmt.Errorf("%w: GPU %d on node %s", ErrGPUTaken, idx, nodeID)
+			}
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return chosen, nil
+}
+
+// AllocSpecificGPUs reserves exactly the given indices for containerID on
+// nodeID. If any one of them is already allocated, none are reserved and
+// the call returns ErrGPUTaken.
+func (s *Store) AllocSpecificGPUs(ctx context.Context, nodeID, containerID string, indices []uint32) error {
+	if len(indices) == 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	for _, idx := range indices {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO gpu_alloc(node_id, gpu_index, container_id, allocated_at) VALUES(?, ?, ?, ?)`,
+			nodeID, idx, containerID, now); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: GPU %d on node %s", ErrGPUTaken, idx, nodeID)
+			}
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// FreeGPUs releases every GPU reservation held by containerID. Safe to
+// call on a container with no allocations.
+func (s *Store) FreeGPUs(ctx context.Context, containerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM gpu_alloc WHERE container_id=?`, containerID)
+	return err
+}
+
+// GetContainerGPUs returns the indices currently reserved by containerID,
+// in ascending order. Empty slice if the container holds no GPUs.
+func (s *Store) GetContainerGPUs(ctx context.Context, containerID string) ([]uint32, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT gpu_index FROM gpu_alloc WHERE container_id=? ORDER BY gpu_index`, containerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []uint32
+	for rows.Next() {
+		var i uint32
+		if err := rows.Scan(&i); err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
+}
+
+// GPUUsageByNode returns the count of reserved GPUs per node.
+func (s *Store) GPUUsageByNode(ctx context.Context) (map[string]uint32, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT node_id, COUNT(*) FROM gpu_alloc GROUP BY node_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]uint32{}
+	for rows.Next() {
+		var node string
+		var n uint32
+		if err := rows.Scan(&node, &n); err != nil {
+			return nil, err
+		}
+		out[node] = n
+	}
+	return out, rows.Err()
+}
+
+// GPUAlloc is a single reservation row enriched with the holding
+// container's human name. Returned by ListGPUAllocsForNode.
+type GPUAlloc struct {
+	Index         uint32
+	ContainerID   string
+	ContainerName string
+}
+
+// ListGPUAllocsForNode returns every GPU reservation on nodeID, with
+// the holding container's name joined in. Indices appear in ascending
+// order. Empty slice if the node has no allocations.
+func (s *Store) ListGPUAllocsForNode(ctx context.Context, nodeID string) ([]GPUAlloc, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT g.gpu_index, g.container_id, COALESCE(c.name, '')
+  FROM gpu_alloc g
+  LEFT JOIN containers c ON c.id = g.container_id
+ WHERE g.node_id = ?
+ ORDER BY g.gpu_index`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []GPUAlloc
+	for rows.Next() {
+		var a GPUAlloc
+		if err := rows.Scan(&a.Index, &a.ContainerID, &a.ContainerName); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+func readUsedIndices(ctx context.Context, tx *sql.Tx, nodeID string) (map[uint32]bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT gpu_index FROM gpu_alloc WHERE node_id=?`, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	used := map[uint32]bool{}
+	for rows.Next() {
+		var i uint32
+		if err := rows.Scan(&i); err != nil {
+			return nil, err
+		}
+		used[i] = true
+	}
+	return used, rows.Err()
+}
+
+func isUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	// modernc.org/sqlite surfaces these as "constraint failed: UNIQUE constraint failed: ..."
+	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "constraint failed: UNIQUE")
 }

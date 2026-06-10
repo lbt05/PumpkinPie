@@ -130,6 +130,7 @@ message ResourceSpec {
   double            cpu_cores       = 1; // 0 = unlimited
   uint64            memory_bytes    = 2; // 0 = unlimited
   uint32            gpu_count       = 3; // 0 = no GPU
+  repeated uint32   gpu_device_ids  = 4; // master-pinned GPU indices (preferred over count)
 }
 
 message CreateContainerCommand {

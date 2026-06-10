@@ -59,21 +59,26 @@ function resourcesLabel(c: Container): string {
   const hasGpu = c.gpu_count > 0
   if (!hasCpu && !hasMem && !hasGpu) return t('common.unlimited')
   const mem = hasMem ? fmtBytes(c.memory_bytes) : ''
+  let base: string
   if (hasCpu && hasMem && hasGpu) {
-    return t('resources.cpuMemGpu', { cpu: c.cpu_cores, mem, n: c.gpu_count })
+    base = t('resources.cpuMemGpu', { cpu: c.cpu_cores, mem, n: c.gpu_count })
+  } else if (hasCpu && hasMem) {
+    base = t('resources.cpuAndMem', { cpu: c.cpu_cores, mem })
+  } else if (hasCpu && hasGpu) {
+    base = t('resources.cpuOnly', { n: c.cpu_cores }) + ' · ' + t('resources.gpuOnly', { n: c.gpu_count })
+  } else if (hasMem && hasGpu) {
+    base = mem + ' · ' + t('resources.gpuOnly', { n: c.gpu_count })
+  } else if (hasCpu) {
+    base = t('resources.cpuOnly', { n: c.cpu_cores })
+  } else if (hasMem) {
+    base = mem
+  } else {
+    base = t('resources.gpuOnly', { n: c.gpu_count })
   }
-  if (hasCpu && hasMem) {
-    return t('resources.cpuAndMem', { cpu: c.cpu_cores, mem })
+  if (hasGpu && c.gpu_indices && c.gpu_indices.length > 0) {
+    base += ' · ' + t('resources.gpuIndices', { idx: c.gpu_indices.join(', ') })
   }
-  if (hasCpu && hasGpu) {
-    return t('resources.cpuOnly', { n: c.cpu_cores }) + ' · ' + t('resources.gpuOnly', { n: c.gpu_count })
-  }
-  if (hasMem && hasGpu) {
-    return mem + ' · ' + t('resources.gpuOnly', { n: c.gpu_count })
-  }
-  if (hasCpu) return t('resources.cpuOnly', { n: c.cpu_cores })
-  if (hasMem) return mem
-  return t('resources.gpuOnly', { n: c.gpu_count })
+  return base
 }
 
 async function confirm(title: string): Promise<boolean> {

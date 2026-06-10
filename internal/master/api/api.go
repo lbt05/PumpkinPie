@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -56,6 +57,7 @@ func (s *Server) Engine() *gin.Engine {
 	r.GET("/api/nodes", s.listNodes)
 	r.GET("/api/nodes/:id", s.getNode)
 	r.GET("/api/nodes/:id/containers", s.listNodeContainers)
+	r.GET("/api/nodes/:id/gpus", s.listNodeGPUs)
 
 	r.GET("/api/containers", s.listContainers)
 	r.GET("/api/containers/:id", s.getContainer)
@@ -96,6 +98,7 @@ func (s *Server) listNodes(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+	gpuUsed, _ := s.store.GPUUsageByNode(c.Request.Context())
 	out := make([]gin.H, 0, len(nodes))
 	online := s.mgr.Online()
 	onlineSet := map[string]bool{}
@@ -123,6 +126,8 @@ func (s *Server) listNodes(c *gin.Context) {
 			"mem_total_bytes":     n.MemTotalBytes,
 			"load1":               n.Load1,
 			"gpu_count":           n.GpuCount,
+			"gpu_used":            gpuUsed[n.ID],
+			"gpu_free":            freeGPUsForRow(n.GpuCount, gpuUsed[n.ID]),
 			"gpu_mem_used_bytes":  n.GpuMemUsed,
 			"gpu_mem_total_bytes": n.GpuMemTotal,
 			"gpu_usage_percent":   n.GpuUsageAvg,
@@ -167,6 +172,64 @@ func (s *Server) listNodeContainers(c *gin.Context) {
 	c.JSON(200, gin.H{"containers": out})
 }
 
+// listNodeGPUs returns one row per physical GPU on the node, merging
+// the agent's reported devices (name/uuid/memory from nvidia-smi)
+// with the master's live allocation table.
+func (s *Server) listNodeGPUs(c *gin.Context) {
+	nodeID := c.Param("id")
+	n, err := s.store.GetNode(c.Request.Context(), nodeID)
+	if err != nil {
+		c.JSON(404, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Parse the agent's most recent nvidia-smi snapshot (if any).
+	type reportedGPU struct {
+		Index         uint32 `json:"index"`
+		Name          string `json:"name"`
+		UUID          string `json:"uuid"`
+		MemTotalBytes uint64 `json:"mem_total_bytes"`
+	}
+	var reported []reportedGPU
+	if n.GPUJSON != "" {
+		_ = json.Unmarshal([]byte(n.GPUJSON), &reported)
+	}
+
+	allocs, err := s.store.ListGPUAllocsForNode(c.Request.Context(), nodeID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	byIndex := map[uint32]store.GPUAlloc{}
+	for _, a := range allocs {
+		byIndex[a.Index] = a
+	}
+
+	out := make([]gin.H, 0, n.GpuCount)
+	for i := uint32(0); i < n.GpuCount; i++ {
+		row := gin.H{"index": i}
+		// merge reported info if present
+		for _, r := range reported {
+			if r.Index == i {
+				row["name"] = r.Name
+				row["uuid"] = r.UUID
+				row["mem_total_bytes"] = r.MemTotalBytes
+				break
+			}
+		}
+		if a, held := byIndex[i]; held {
+			row["held_by"] = gin.H{
+				"container_id":   a.ContainerID,
+				"container_name": a.ContainerName,
+			}
+		} else {
+			row["held_by"] = nil
+		}
+		out = append(out, row)
+	}
+	c.JSON(200, gin.H{"gpus": out})
+}
+
 // ---- Containers ----
 
 type createContainerReq struct {
@@ -182,6 +245,7 @@ type createContainerReq struct {
 	CPUCores    float64 `json:"cpu_cores"`
 	MemoryBytes uint64  `json:"memory_bytes"`
 	GPUCount    uint32  `json:"gpu_count"`
+	GPUIndices  []uint32 `json:"gpu_indices"` // optional: pin to specific indices on node_id
 	NodeID      string  `json:"node_id"` // optional: pin to specific node
 	Pull        bool    `json:"pull"`
 	ExternalPort uint32 `json:"external_port"` // 0 = auto-allocate
@@ -198,6 +262,28 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
+	// If the caller wants to pin specific GPU indices, validate up front
+	// and derive gpu_count from the selection (single source of truth).
+	if len(req.GPUIndices) > 0 {
+		if req.NodeID == "" {
+			c.JSON(400, gin.H{"error": "gpu_indices requires node_id (pin a node when picking specific GPUs)"})
+			return
+		}
+		seen := map[uint32]bool{}
+		for _, idx := range req.GPUIndices {
+			if seen[idx] {
+				c.JSON(400, gin.H{"error": fmt.Sprintf("gpu_indices contains duplicate index %d", idx)})
+				return
+			}
+			seen[idx] = true
+		}
+		if req.GPUCount != 0 && req.GPUCount != uint32(len(req.GPUIndices)) {
+			c.JSON(400, gin.H{"error": fmt.Sprintf("gpu_count=%d disagrees with gpu_indices length %d", req.GPUCount, len(req.GPUIndices))})
+			return
+		}
+		req.GPUCount = uint32(len(req.GPUIndices))
+	}
+
 	// Pick a node
 	var target *store.Node
 	if req.NodeID != "" {
@@ -205,6 +291,28 @@ func (s *Server) createContainer(c *gin.Context) {
 		if err != nil {
 			c.JSON(400, gin.H{"error": "node_id not found"})
 			return
+		}
+		// Validate explicit indices against the node's reported total.
+		for i, idx := range req.GPUIndices {
+			if idx >= n.GpuCount {
+				c.JSON(400, gin.H{"error": fmt.Sprintf("gpu_indices[%d]=%d is out of range; node %s has %d GPUs", i, idx, n.ID, n.GpuCount)})
+				return
+			}
+		}
+		// When the user pins a node, still verify it has enough free GPUs
+		// so the failure mode matches the auto-scheduler path. (Skipped
+		// for explicit indices; AllocSpecificGPUs will detect collisions.)
+		if req.GPUCount > 0 && len(req.GPUIndices) == 0 {
+			used, err := s.store.GPUUsageByNode(c.Request.Context())
+			if err != nil {
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+			free := scheduler.FreeGPUs(n, used)
+			if free < req.GPUCount {
+				c.JSON(409, gin.H{"error": fmt.Sprintf("node %s has %d free GPUs, %d requested", n.ID, free, req.GPUCount)})
+				return
+			}
 		}
 		target = n
 	} else {
@@ -214,7 +322,7 @@ func (s *Server) createContainer(c *gin.Context) {
 			GPUCount:    req.GPUCount,
 		})
 		if err != nil {
-			c.JSON(400, gin.H{"error": err.Error(), "hint": "no suitable node; relax resource requirements or wait for nodes to come online"})
+			c.JSON(409, gin.H{"error": err.Error(), "hint": "no suitable node; relax resource requirements or wait for nodes to come online"})
 			return
 		}
 		target = n
@@ -262,29 +370,73 @@ func (s *Server) createContainer(c *gin.Context) {
 		externalPort = p
 	}
 
+	// Allocate GPUs (exclusive reservation). If any step below fails we
+	// must release them; track via `gpuAllocated`.
+	var gpuIndices []uint32
+	gpuAllocated := false
+	if req.GPUCount > 0 {
+		var err error
+		if len(req.GPUIndices) > 0 {
+			err = s.store.AllocSpecificGPUs(c.Request.Context(), target.ID, containerID, req.GPUIndices)
+			if err == nil {
+				gpuIndices = append(gpuIndices, req.GPUIndices...)
+			}
+		} else {
+			var idx []uint32
+			idx, err = s.store.AllocGPUs(c.Request.Context(), target.ID, containerID, int(req.GPUCount), target.GpuCount)
+			gpuIndices = idx
+		}
+		if err != nil {
+			if errors.Is(err, store.ErrInsufficientGPUs) || errors.Is(err, store.ErrGPUTaken) {
+				c.JSON(409, gin.H{"error": err.Error()})
+			} else {
+				c.JSON(500, gin.H{"error": err.Error()})
+			}
+			if externalPort != 0 {
+				_ = s.store.FreePort(c.Request.Context(), externalPort)
+			}
+			return
+		}
+		gpuAllocated = true
+	}
+	defer func() {
+		if gpuAllocated {
+			_ = s.store.FreeGPUs(c.Request.Context(), containerID)
+		}
+	}()
+
 	envJSON, _ := json.Marshal(req.Env)
 	cmdJSON, _ := json.Marshal(req.Cmd)
 	portsJSON, _ := json.Marshal(ports)
 	volBinds, _ := json.Marshal(req.VolumeBinds)
+	gpuIdxJSON := ""
+	if len(gpuIndices) > 0 {
+		b, _ := json.Marshal(gpuIndices)
+		gpuIdxJSON = string(b)
+	}
 
 	cc := &store.Container{
-		ID:           containerID,
-		NodeID:       target.ID,
-		Name:         containerName,
-		Image:        req.Image,
-		State:        "creating",
-		Status:       "creating",
-		EnvJSON:      string(envJSON),
-		CmdJSON:      string(cmdJSON),
-		PortsJSON:    string(portsJSON),
-		VolumeBinds:  string(volBinds),
-		CPUCores:     req.CPUCores,
-		MemoryBytes:  req.MemoryBytes,
-		GPUCount:     req.GPUCount,
-		ExternalPort: externalPort,
+		ID:             containerID,
+		NodeID:         target.ID,
+		Name:           containerName,
+		Image:          req.Image,
+		State:          "creating",
+		Status:         "creating",
+		EnvJSON:        string(envJSON),
+		CmdJSON:        string(cmdJSON),
+		PortsJSON:      string(portsJSON),
+		VolumeBinds:    string(volBinds),
+		CPUCores:       req.CPUCores,
+		MemoryBytes:    req.MemoryBytes,
+		GPUCount:       req.GPUCount,
+		GPUIndicesJSON: gpuIdxJSON,
+		ExternalPort:   externalPort,
 	}
 	if err := s.store.InsertContainer(c.Request.Context(), cc); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
+		if externalPort != 0 {
+			_ = s.store.FreePort(c.Request.Context(), externalPort)
+		}
 		return
 	}
 
@@ -305,9 +457,10 @@ func (s *Server) createContainer(c *gin.Context) {
 		VolumeBinds: req.VolumeBinds,
 		Ports:       ports,
 		Resources: &pb.ResourceSpec{
-			CpuCores:    req.CPUCores,
-			MemoryBytes: req.MemoryBytes,
-			GpuCount:    req.GPUCount,
+			CpuCores:     req.CPUCores,
+			MemoryBytes:  req.MemoryBytes,
+			GpuCount:     req.GPUCount,
+			GpuDeviceIds: gpuIndices,
 		},
 		Name: containerName,
 		Pull: req.Pull,
@@ -319,11 +472,20 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
-	c.JSON(200, gin.H{
+	// Hand-off succeeded: do NOT release the GPUs in the deferred cleanup.
+	// The agent now owns the container; its lifecycle callbacks (or an
+	// explicit delete) are responsible for FreeGPUs.
+	gpuAllocated = false
+
+	resp := gin.H{
 		"container":    cc,
 		"node":         gin.H{"id": target.ID, "name": target.Name},
 		"external_url": externalURL(c, externalPort),
-	})
+	}
+	if len(gpuIndices) > 0 {
+		resp["gpu_indices"] = gpuIndices
+	}
+	c.JSON(200, resp)
 }
 
 func (s *Server) getContainer(c *gin.Context) {
@@ -332,7 +494,31 @@ func (s *Server) getContainer(c *gin.Context) {
 		c.JSON(404, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, cc)
+	out := gin.H{
+		"id":            cc.ID,
+		"node_id":       cc.NodeID,
+		"docker_id":     cc.DockerID,
+		"name":          cc.Name,
+		"image":         cc.Image,
+		"state":         cc.State,
+		"status":        cc.Status,
+		"cpu_cores":     cc.CPUCores,
+		"memory_bytes":  cc.MemoryBytes,
+		"gpu_count":     cc.GPUCount,
+		"external_port": cc.ExternalPort,
+		"created_at":    cc.CreatedAt,
+		"updated_at":    cc.UpdatedAt,
+	}
+	if cc.GPUIndicesJSON != "" {
+		var idx []uint32
+		if err := json.Unmarshal([]byte(cc.GPUIndicesJSON), &idx); err == nil {
+			out["gpu_indices"] = idx
+		}
+	}
+	if cc.ExternalPort != 0 {
+		out["external_url"] = externalURL(c, cc.ExternalPort)
+	}
+	c.JSON(200, out)
 }
 
 func (s *Server) listContainers(c *gin.Context) {
@@ -380,6 +566,12 @@ func (s *Server) listContainers(c *gin.Context) {
 			_ = json.Unmarshal([]byte(cc.PortsJSON), &ports)
 			row["ports"] = ports
 		}
+		if cc.GPUIndicesJSON != "" {
+			var idx []uint32
+			if err := json.Unmarshal([]byte(cc.GPUIndicesJSON), &idx); err == nil {
+				row["gpu_indices"] = idx
+			}
+		}
 		if cc.ExternalPort != 0 {
 			row["external_url"] = externalURL(c, cc.ExternalPort)
 		}
@@ -389,7 +581,8 @@ func (s *Server) listContainers(c *gin.Context) {
 }
 
 // deleteContainer stops + removes the Docker container, then forgets
-// about it on the master (releases the proxy port and DB row).
+// about it on the master (releases the proxy port, GPU reservation,
+// and DB row).
 func (s *Server) deleteContainer(c *gin.Context) {
 	id := c.Param("id")
 	cc, err := s.store.GetContainer(c.Request.Context(), id)
@@ -405,11 +598,16 @@ func (s *Server) deleteContainer(c *gin.Context) {
 		s.proxy.UnregisterRoute(cc.ExternalPort)
 		_ = s.store.FreePort(c.Request.Context(), cc.ExternalPort)
 	}
+	_ = s.store.FreeGPUs(c.Request.Context(), id)
 	_ = s.store.DeleteContainer(c.Request.Context(), id)
 	c.JSON(200, gin.H{"ok": true})
 }
 
-// startContainer starts an existing (stopped) Docker container.
+// startContainer starts an existing (stopped) Docker container. The
+// Docker container was created with specific GPU indices baked into
+// its config, so we must reserve exactly those indices before sending
+// the start command \u2014 otherwise the daemon would silently time-slice
+// the contended GPUs with whoever else has them.
 func (s *Server) startContainer(c *gin.Context) {
 	id := c.Param("id")
 	cc, err := s.store.GetContainer(c.Request.Context(), id)
@@ -422,15 +620,43 @@ func (s *Server) startContainer(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "node offline"})
 		return
 	}
+
+	// Re-reserve the same GPU indices the container was created with.
+	// If any are now held by another container, fail loud: starting
+	// here would force silent GPU sharing.
+	var savedGPUs []uint32
+	if cc.GPUIndicesJSON != "" {
+		_ = json.Unmarshal([]byte(cc.GPUIndicesJSON), &savedGPUs)
+	}
+	if len(savedGPUs) > 0 {
+		if err := s.store.AllocSpecificGPUs(c.Request.Context(), cc.NodeID, cc.ID, savedGPUs); err != nil {
+			if errors.Is(err, store.ErrGPUTaken) {
+				c.JSON(409, gin.H{
+					"error":         err.Error(),
+					"hint":          "delete this container and create a new one to get fresh GPU assignment",
+					"saved_indices": savedGPUs,
+				})
+				return
+			}
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
 	if err := sess.Send(&pb.MasterMessage{
 		Payload: &pb.MasterMessage_StartContainer{StartContainer: &pb.StartContainerCommand{
 			ContainerId: cc.ID,
 			DockerId:    cc.DockerID,
 		}},
 	}); err != nil {
+		// Roll back the reservation we just took.
+		if len(savedGPUs) > 0 {
+			_ = s.store.FreeGPUs(c.Request.Context(), cc.ID)
+		}
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
+
 	// Re-bind the proxy port + route if it was released while the
 	// container was stopped. The proxy already has the listener
 	// bookkeeping, so we re-register the route then ask it to bind.
@@ -452,7 +678,11 @@ func (s *Server) startContainer(c *gin.Context) {
 }
 
 // stopContainer stops a running container but keeps it (and its proxy
-// port) around so it can be started again.
+// port) around so it can be started again. The GPU reservation is
+// released so other containers can use those devices; on /start we
+// attempt to re-reserve the original indices (Docker baked them into
+// the container's config and will reattach them; if they're now taken,
+// start fails loudly).
 func (s *Server) stopContainer(c *gin.Context) {
 	id := c.Param("id")
 	cc, err := s.store.GetContainer(c.Request.Context(), id)
@@ -469,6 +699,7 @@ func (s *Server) stopContainer(c *gin.Context) {
 	if cc.ExternalPort != 0 {
 		s.proxy.UnregisterRoute(cc.ExternalPort)
 	}
+	_ = s.store.FreeGPUs(c.Request.Context(), cc.ID)
 	c.JSON(200, gin.H{"ok": true})
 }
 

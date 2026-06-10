@@ -270,6 +270,10 @@ func (s *Session) handleContainerCreated(ctx context.Context, mgr *Manager, c *p
 	state, status := "created", "created"
 	if c.Error != "" {
 		state, status = "error", c.Error
+		// Release any GPU reservation we made on the master side \u2014
+		// the container never came up so those devices should be
+		// available to other workloads.
+		_ = mgr.store.FreeGPUs(ctx, c.ContainerId)
 	}
 	_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, state, status)
 	mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "container", At: time.Now()})
