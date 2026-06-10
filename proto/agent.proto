@@ -53,6 +53,7 @@ message RegisterRequest {
   string            arch        = 4;
   string            agent_version = 5;
   repeated string   docker_volumes = 6; // host paths mounted into agent
+  string            machine_id  = 7; // stable hardware id (/etc/machine-id, IOPlatformUUID, ...)
 }
 
 message RegisterResponse {

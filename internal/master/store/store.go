@@ -17,6 +17,7 @@ type Store struct {
 
 type Node struct {
 	ID            string    `json:"id"`
+	MachineID     string    `json:"machine_id"`
 	Name          string    `json:"name"`
 	Hostname      string    `json:"hostname"`
 	OS            string    `json:"os"`
@@ -77,6 +78,7 @@ func (s *Store) Close() error { return s.db.Close() }
 const schema = `
 CREATE TABLE IF NOT EXISTS nodes (
 	id              TEXT PRIMARY KEY,
+	machine_id      TEXT NOT NULL DEFAULT '',
 	name            TEXT NOT NULL,
 	hostname        TEXT,
 	os              TEXT,
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS nodes (
 	metrics_at      DATETIME
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_state ON nodes(state);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_machine_id ON nodes(machine_id) WHERE machine_id <> '';
 
 CREATE TABLE IF NOT EXISTS containers (
 	id              TEXT PRIMARY KEY,
@@ -137,14 +140,35 @@ func (s *Store) UpsertNode(ctx context.Context, n *Node) error {
 		n.RegisteredAt = time.Now().UTC()
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO nodes (id, name, hostname, os, arch, agent_version, state, last_heartbeat, registered_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO nodes (id, machine_id, name, hostname, os, arch, agent_version, state, last_heartbeat, registered_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
-  name=excluded.name, hostname=excluded.hostname, os=excluded.os, arch=excluded.arch,
-  agent_version=excluded.agent_version, state=excluded.state, last_heartbeat=excluded.last_heartbeat
-`, n.ID, n.Name, n.Hostname, n.OS, n.Arch, n.AgentVersion, n.State,
+  machine_id=excluded.machine_id, name=excluded.name, hostname=excluded.hostname,
+  os=excluded.os, arch=excluded.arch, agent_version=excluded.agent_version,
+  state=excluded.state, last_heartbeat=excluded.last_heartbeat
+`, n.ID, n.MachineID, n.Name, n.Hostname, n.OS, n.Arch, n.AgentVersion, n.State,
 		n.LastHeartbeat, n.RegisteredAt)
 	return err
+}
+
+// GetNodeByMachineID returns the node with the given machine_id, or
+// sql.ErrNoRows if none matches. machineID == "" never matches.
+func (s *Store) GetNodeByMachineID(ctx context.Context, machineID string) (*Node, error) {
+	if machineID == "" {
+		return nil, sql.ErrNoRows
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, machine_id, name, hostname, os, arch, agent_version, state,
+		last_heartbeat, registered_at, cpu_percent, cpu_cores, mem_used_bytes, mem_total_bytes,
+		COALESCE(disk_json, ''), COALESCE(gpu_json, ''), load1, gpu_count, gpu_mem_used, gpu_mem_total, gpu_usage_avg, metrics_at
+		FROM nodes WHERE machine_id=?`, machineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, sql.ErrNoRows
+	}
+	return scanNode(rows)
 }
 
 func (s *Store) UpdateNodeState(ctx context.Context, id, state string) error {
@@ -168,7 +192,7 @@ WHERE id=?`,
 }
 
 func (s *Store) ListNodes(ctx context.Context) ([]*Node, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, hostname, os, arch, agent_version, state,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, machine_id, name, hostname, os, arch, agent_version, state,
 		last_heartbeat, registered_at, cpu_percent, cpu_cores, mem_used_bytes, mem_total_bytes,
 		COALESCE(disk_json, ''), COALESCE(gpu_json, ''), load1, gpu_count, gpu_mem_used, gpu_mem_total, gpu_usage_avg, metrics_at
 		FROM nodes ORDER BY registered_at DESC`)
@@ -178,18 +202,9 @@ func (s *Store) ListNodes(ctx context.Context) ([]*Node, error) {
 	defer rows.Close()
 	var out []*Node
 	for rows.Next() {
-		n := &Node{}
-		var lastHB, metricsAt sql.NullTime
-		if err := rows.Scan(&n.ID, &n.Name, &n.Hostname, &n.OS, &n.Arch, &n.AgentVersion, &n.State,
-			&lastHB, &n.RegisteredAt, &n.CPUPercent, &n.CPUCores, &n.MemUsedBytes, &n.MemTotalBytes,
-			&n.DiskJSON, &n.GPUJSON, &n.Load1, &n.GpuCount, &n.GpuMemUsed, &n.GpuMemTotal, &n.GpuUsageAvg, &metricsAt); err != nil {
+		n, err := scanNode(rows)
+		if err != nil {
 			return nil, err
-		}
-		if lastHB.Valid {
-			n.LastHeartbeat = lastHB.Time
-		}
-		if metricsAt.Valid {
-			n.MetricsAt = metricsAt.Time
 		}
 		out = append(out, n)
 	}
@@ -197,7 +212,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]*Node, error) {
 }
 
 func (s *Store) GetNode(ctx context.Context, id string) (*Node, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, hostname, os, arch, agent_version, state,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, machine_id, name, hostname, os, arch, agent_version, state,
 		last_heartbeat, registered_at, cpu_percent, cpu_cores, mem_used_bytes, mem_total_bytes,
 		COALESCE(disk_json, ''), COALESCE(gpu_json, ''), load1, gpu_count, gpu_mem_used, gpu_mem_total, gpu_usage_avg, metrics_at
 		FROM nodes WHERE id=?`, id)
@@ -208,20 +223,24 @@ func (s *Store) GetNode(ctx context.Context, id string) (*Node, error) {
 	if !rows.Next() {
 		return nil, sql.ErrNoRows
 	}
+	return scanNode(rows)
+}
+
+func scanNode(rows *sql.Rows) (*Node, error) {
 	n := &Node{}
 	var lastHB, metricsAt sql.NullTime
-	err = rows.Scan(&n.ID, &n.Name, &n.Hostname, &n.OS, &n.Arch, &n.AgentVersion, &n.State,
+	if err := rows.Scan(&n.ID, &n.MachineID, &n.Name, &n.Hostname, &n.OS, &n.Arch, &n.AgentVersion, &n.State,
 		&lastHB, &n.RegisteredAt, &n.CPUPercent, &n.CPUCores, &n.MemUsedBytes, &n.MemTotalBytes,
-		&n.DiskJSON, &n.GPUJSON, &n.Load1, &n.GpuCount, &n.GpuMemUsed, &n.GpuMemTotal, &n.GpuUsageAvg, &metricsAt)
-	if err == nil {
-		if lastHB.Valid {
-			n.LastHeartbeat = lastHB.Time
-		}
-		if metricsAt.Valid {
-			n.MetricsAt = metricsAt.Time
-		}
+		&n.DiskJSON, &n.GPUJSON, &n.Load1, &n.GpuCount, &n.GpuMemUsed, &n.GpuMemTotal, &n.GpuUsageAvg, &metricsAt); err != nil {
+		return nil, err
 	}
-	return n, err
+	if lastHB.Valid {
+		n.LastHeartbeat = lastHB.Time
+	}
+	if metricsAt.Valid {
+		n.MetricsAt = metricsAt.Time
+	}
+	return n, nil
 }
 
 // ---------- Containers ----------

@@ -22,6 +22,7 @@ import (
 type Agent struct {
 	masterAddr string
 	nodeName   string
+	machineID  string
 
 	collector *collector.Collector
 	docker    *docker.Client
@@ -41,7 +42,7 @@ type tunnel struct {
 	finished chan struct{}
 }
 
-func New(masterAddr, nodeName string) (*Agent, error) {
+func New(masterAddr, nodeName, machineID string) (*Agent, error) {
 	dc, err := docker.New()
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
@@ -49,6 +50,7 @@ func New(masterAddr, nodeName string) (*Agent, error) {
 	return &Agent{
 		masterAddr: masterAddr,
 		nodeName:   nodeName,
+		machineID:  machineID,
 		collector:  collector.New(nodeName),
 		docker:     dc,
 		tunnels:    make(map[string]*tunnel),
@@ -117,6 +119,7 @@ func (a *Agent) serve(ctx context.Context, hostname, os, arch, version string) e
 				Os:           os,
 				Arch:         arch,
 				AgentVersion: version,
+				MachineId:    a.machineID,
 			},
 		},
 	}); err != nil {

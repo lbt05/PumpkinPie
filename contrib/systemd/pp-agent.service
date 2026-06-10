@@ -15,8 +15,14 @@ Environment=DOCKER_SOCK=/var/run/docker.sock
 # Override the node name to something unique per host, e.g. via hostnamectl.
 ExecStart=/usr/local/bin/pp agent \
   --master=pp-master.internal:7000 \
-  --name=%H
-WorkingDirectory=/var/lib/pp
+  --name=%H \
+  --state-dir=/var/lib/pp-agent
+WorkingDirectory=/var/lib/pp-agent
+# systemd creates /var/lib/pp-agent owned by this unit's user on first
+# start; the agent persists its machine-id there so renaming or
+# restarting the agent does not register as a new node.
+StateDirectory=pp-agent
+StateDirectoryMode=0700
 
 # The agent connects outbound to the master and is reachable from the
 # master for proxy tunnels, but it does NOT need to listen on a public

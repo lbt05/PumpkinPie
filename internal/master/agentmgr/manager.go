@@ -3,7 +3,9 @@ package agentmgr
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -85,28 +87,45 @@ func (m *Manager) OnAgentConnect(ctx context.Context, stream pb.AgentService_Con
 }
 
 func (m *Manager) resolveNodeID(ctx context.Context, reg *pb.RegisterRequest) (string, error) {
-	// Try to find existing node by name+hostname.
-	nodes, err := m.store.ListNodes(ctx)
-	if err != nil {
+	if reg.MachineId == "" {
+		return "", fmt.Errorf("register: machine_id required")
+	}
+
+	// Existing node for this machine? Reuse its ID and refresh the
+	// mutable fields (name/hostname/os/version) so renaming an agent
+	// doesn't create a duplicate row.
+	existing, err := m.store.GetNodeByMachineID(ctx, reg.MachineId)
+	if err == nil {
+		existing.Name = reg.Name
+		existing.Hostname = reg.Hostname
+		existing.OS = reg.Os
+		existing.Arch = reg.Arch
+		existing.AgentVersion = reg.AgentVersion
+		existing.State = "online"
+		existing.LastHeartbeat = time.Now().UTC()
+		if err := m.store.UpsertNode(ctx, existing); err != nil {
+			return "", err
+		}
+		return existing.ID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
-	for _, n := range nodes {
-		if n.Name == reg.Name && n.Hostname == reg.Hostname {
-			return n.ID, nil
-		}
-	}
+
+	// Brand new node.
 	id, err := randomID()
 	if err != nil {
 		return "", err
 	}
 	n := &store.Node{
-		ID:           id,
-		Name:         reg.Name,
-		Hostname:     reg.Hostname,
-		OS:           reg.Os,
-		Arch:         reg.Arch,
-		AgentVersion: reg.AgentVersion,
-		State:        "online",
+		ID:            id,
+		MachineID:     reg.MachineId,
+		Name:          reg.Name,
+		Hostname:      reg.Hostname,
+		OS:            reg.Os,
+		Arch:          reg.Arch,
+		AgentVersion:  reg.AgentVersion,
+		State:         "online",
 		LastHeartbeat: time.Now().UTC(),
 		RegisteredAt:  time.Now().UTC(),
 	}
