@@ -47,71 +47,37 @@ tunneled over gRPC to the right node.
 
 ### 0. Install build dependencies
 
-You only need these on the machine where you build (the master binary
-itself is static and has no runtime deps other than the Linux kernel +
-Docker on agent hosts).
+You only need these on the machine where you build. Follow the
+official install docs — these projects ship their own installers and
+update them on every release.
 
-**Required on every platform:**
-- **Go 1.23+** — <https://go.dev/dl/>
-- **Node.js 20+ and npm** — <https://nodejs.org/>
-- **Docker** — only on machines that will run `pp agent`
+- **Go 1.23+** — <https://go.dev/doc/install>
+- **Node.js 20+ and npm** — <https://nodejs.org/en/download>
+- **Docker** — <https://docs.docker.com/engine/install/> (only on
+  machines that will run `pp agent`)
 
-**Required only to regenerate proto** (you can skip this if you don't
-plan to edit `proto/agent.proto`; `make build` and `make all` work fine
-without it because generated files are committed):
-- `protoc` (protobuf compiler)
-- `protoc-gen-go` and `protoc-gen-go-grpc` (Go gRPC plugins)
+The `pp` binary itself is statically linked and has no runtime
+dependencies beyond the Linux kernel.
 
-Install `protoc` for your OS:
+**Only required if you plan to edit `proto/agent.proto`** (the
+generated `proto/gen/*.pb.go` files are committed, so a fresh
+`make build` works without these):
+- `protoc` — <https://grpc.io/docs/protoc-installation/>
+- `protoc-gen-go` and `protoc-gen-go-grpc` — install with:
+  ```bash
+  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  export PATH="$PATH:$(go env GOPATH)/bin"
+  ```
 
-```bash
-# Debian / Ubuntu
-sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-# RHEL / Fedora / Rocky
-sudo dnf install -y protobuf-compiler
-
-# Alpine
-sudo apk add --no-cache protoc
-
-# macOS
-brew install protobuf
-
-# Arch
-sudo pacman -S protobuf
-```
-
-Install the Go plugins (host Go, so they go in `$GOBIN`):
-
-```bash
-go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-
-# make sure $GOBIN (or $(go env GOPATH)/bin) is on $PATH
-export PATH="$PATH:$(go env GOPATH)/bin"
-```
-
-Verify the toolchain:
+Verify your toolchain:
 
 ```bash
 go version          # go1.23+
 node --version      # v20+
-protoc --version    # libprotoc 3.x+
-which protoc-gen-go protoc-gen-go-grpc
-```
-
-**Install Docker** (only on machines that will run `pp agent`):
-
-```bash
-# Debian / Ubuntu — see https://docs.docker.com/engine/install/
-curl -fsSL https://get.docker.com | sudo sh
-sudo usermod -aG docker $USER   # log out and back in
-
-# RHEL / Fedora
-sudo dnf install -y docker docker-compose-plugin
-sudo systemctl enable --now docker
-
-# macOS — install Docker Desktop from https://docker.com/products/docker-desktop/
+npm --version       # 10+
+docker --version    # any recent
+protoc --version    # libprotoc 3.x+   (optional, only for proto regen)
 ```
 
 If you are behind a firewall and `npm install` is slow, point npm at a
@@ -124,13 +90,13 @@ npm config set registry https://registry.npmmirror.com
 ### 1. Build everything
 
 ```bash
-make all           # generates proto, builds web/dist, builds bin/pp
+make all           # builds bin/pp and web/dist
 ```
 
 `make all` will:
-1. Run `make proto` — only if `protoc` is on `PATH`. If you skipped
-   step 0, the committed generated code is used and this step is a no-op.
-2. Run `go mod download` (implicit) and compile `bin/pp`.
+1. Run `make proto` if `protoc` is on `PATH` (no-op otherwise — committed
+   generated code is used).
+2. Compile `bin/pp` (Go static binary).
 3. Run `npm ci` in `web/` and produce `web/dist/`.
 
 If you only want the Go binary (no UI bundle):
