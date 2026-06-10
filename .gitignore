@@ -7,7 +7,8 @@
 
 # Web
 web/node_modules/
-web/dist/
+web/dist/*
+!web/dist/.gitkeep
 .env.local
 
 # Generated proto

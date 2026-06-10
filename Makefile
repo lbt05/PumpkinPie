@@ -6,7 +6,7 @@ PROTO_DIR := proto
 PROTO_OUT := proto/gen
 
 .PHONY: all
-all: proto web-deps build
+all: proto web-deps web-build build
 
 .PHONY: proto
 proto:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log"
 	"net/http"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/pumpkinpie/pumpkinpie/internal/master/scheduler"
 	"github.com/pumpkinpie/pumpkinpie/internal/master/store"
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
+	ppweb "github.com/pumpkinpie/pumpkinpie/web"
 )
 
 type Server struct {
@@ -65,8 +67,9 @@ func (s *Server) Engine() *gin.Engine {
 
 	r.GET("/api/ws", s.websocket)
 
-	// serve built frontend under /console (Vite base)
-	r.StaticFS("/console", http.Dir("./web/dist"))
+	// serve built frontend under /console (Vite base), embedded into the binary
+	webFS := ppweb.DistFS()
+	r.StaticFS("/console", http.FS(webFS))
 	r.GET("/console", func(c *gin.Context) { c.Redirect(302, "/console/") })
 	r.NoRoute(func(c *gin.Context) {
 		// SPA fallback: only for non-API, non-asset paths
@@ -75,7 +78,12 @@ func (s *Server) Engine() *gin.Engine {
 			c.JSON(404, gin.H{"error": "not found"})
 			return
 		}
-		c.File("./web/dist/index.html")
+		data, err := fs.ReadFile(webFS, "index.html")
+		if err != nil {
+			c.String(404, "UI bundle not embedded. Rebuild with `make all` (or `make web-build && make build`).")
+			return
+		}
+		c.Data(200, "text/html; charset=utf-8", data)
 	})
 	return r
 }
