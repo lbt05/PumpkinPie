@@ -4,9 +4,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"net"
 	"strconv"
 	"strings"
 
+	"github.com/gin-gonic/gin"
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
 )
 
@@ -16,8 +18,18 @@ func newContainerID() string {
 	return "c-" + hex.EncodeToString(b[:])
 }
 
-func externalURL(port uint32) string {
-	return "http://localhost:" + strconv.FormatUint(uint64(port), 10) + "/"
+func externalURL(c *gin.Context, port uint32) string {
+	host := "localhost"
+	if c != nil && c.Request != nil && c.Request.Host != "" {
+		h := c.Request.Host
+		if hh, _, err := net.SplitHostPort(h); err == nil {
+			h = hh
+		}
+		if h != "" {
+			host = h
+		}
+	}
+	return "http://" + host + ":" + strconv.FormatUint(uint64(port), 10) + "/"
 }
 
 // autoName generates a human-readable name from an image reference when

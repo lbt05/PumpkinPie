@@ -314,7 +314,7 @@ func (s *Server) createContainer(c *gin.Context) {
 	c.JSON(200, gin.H{
 		"container":    cc,
 		"node":         gin.H{"id": target.ID, "name": target.Name},
-		"external_url": externalURL(externalPort),
+		"external_url": externalURL(c, externalPort),
 	})
 }
 
@@ -373,7 +373,7 @@ func (s *Server) listContainers(c *gin.Context) {
 			row["ports"] = ports
 		}
 		if cc.ExternalPort != 0 {
-			row["external_url"] = externalURL(cc.ExternalPort)
+			row["external_url"] = externalURL(c, cc.ExternalPort)
 		}
 		out = append(out, row)
 	}
