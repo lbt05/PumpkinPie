@@ -189,14 +189,16 @@ if [[ -z "$VERSION" ]]; then
       ;;
   esac
 fi
-# Accept both `vX.Y.Z` and `X.Y.Z`; the asset names use `v` prefix.
+# Normalize: tag URLs use the `v` prefix, but goreleaser's default
+# `{{ .Version }}` strips it for asset filenames. Track both forms.
 case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
+VERSION_NO_V="${VERSION#v}"
 log "installing ${PROJECT_NAME} ${VERSION} (${ROLE}) on ${OS}/${GOARCH}"
 
 # --- download + verify --------------------------------------------------------
 [[ -n "$DRY_RUN" ]] && log "DRY RUN: would download to $TMP"
 
-ASSET="${PROJECT_NAME}_${VERSION}_${OS}_${GOARCH}.tar.gz"
+ASSET="${PROJECT_NAME}_${VERSION_NO_V}_${OS}_${GOARCH}.tar.gz"
 BASE_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}/releases/download/${VERSION}"
 TARBALL="${TMP}/${ASSET}"
 CHECKSUMS="${TMP}/checksums.txt"
@@ -204,7 +206,7 @@ CHECKSUMS="${TMP}/checksums.txt"
 log "downloading ${ASSET}"
 if [[ -z "$DRY_RUN" ]]; then
   curl -sSfL --retry 3 -o "$TARBALL"   "${BASE_URL}/${ASSET}"
-  curl -sSfL --retry 3 -o "$CHECKSUMS" "${BASE_URL}/${PROJECT_NAME}_${VERSION}_checksums.txt"
+  curl -sSfL --retry 3 -o "$CHECKSUMS" "${BASE_URL}/${PROJECT_NAME}_${VERSION_NO_V}_checksums.txt"
 
   log "verifying SHA-256"
   # The checksums.txt GoReleaser produces has the form:
