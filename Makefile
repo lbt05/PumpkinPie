@@ -5,6 +5,16 @@ NPM   ?= npm
 PROTO_DIR := proto
 PROTO_OUT := proto/gen
 
+# Build-time version metadata, injected via -ldflags. Override on the
+# command line: `make build VERSION=v0.1.0 COMMIT=$(git rev-parse HEAD)`.
+# GoReleaser sets these automatically (see .goreleaser.yml).
+VERSION   ?= dev
+COMMIT    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS   := -X main.Version=$(VERSION) \
+             -X main.Commit=$(COMMIT) \
+             -X main.BuildTime=$(BUILD_TIME)
+
 .PHONY: all
 all: proto web-deps web-build build
 
@@ -48,7 +58,18 @@ uninstall-systemd:
 
 .PHONY: build
 build:
-	$(GO) build -o bin/pp ./cmd/pp
+	$(GO) build -ldflags "$(LDFLAGS)" -o bin/pp ./cmd/pp
+
+# `make release-snapshot` runs goreleaser in snapshot mode — builds
+# the full cross-compile matrix to ./dist/ without publishing or
+# requiring git tags. Use this to dry-run the release pipeline locally.
+.PHONY: release-snapshot
+release-snapshot:
+	goreleaser release --snapshot --clean --skip publish,announce,validate
+
+.PHONY: release-check
+release-check:
+	goreleaser check
 
 .PHONY: web-deps
 web-deps:
@@ -64,11 +85,11 @@ web-build:
 
 .PHONY: run-master
 run-master:
-	$(GO) run ./cmd/pp master --http=:8080 --grpc=:7000 --db=./pp.db
+	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/pp master --http=:8080 --grpc=:7000 --db=./pp.db
 
 .PHONY: run-agent
 run-agent:
-	$(GO) run ./cmd/pp agent --master=127.0.0.1:7000 --name=local-node
+	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/pp agent --master=127.0.0.1:7000 --name=local-node
 
 .PHONY: clean
 clean:

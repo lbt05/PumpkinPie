@@ -1,0 +1,141 @@
+# pumpkinPie — GoReleaser config
+#
+# Run locally (dry run, no publish):
+#   make release-snapshot
+# Or directly:
+#   goreleaser release --snapshot --clean --skip publish,announce,validate
+#
+# Triggered in CI by the release.yml workflow on every `v*` tag push.
+#
+# Docs: https://goreleaser.com/customization/
+
+version: 2
+
+project_name: pumpkinpie
+
+# The Go module name — used for `-X` ldflags targets and changelog group
+# parsing. Must match the `module` line in go.mod.
+
+# Where GoReleaser puts its working tree. Override with --dist if you want.
+dist: dist
+
+# What we actually build.
+builds:
+  - id: pp
+    main: ./cmd/pp
+    binary: pumpkinpie
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      # The Makefile uses the same ldflags; keep these in lockstep.
+      - -s -w
+      - -X main.Version={{.Version}}
+      - -X main.Commit={{.ShortCommit}}
+      - -X main.BuildTime={{.CommitDate}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    # Skip macOS .DS_Store and the web dev artifacts.
+    ignore:
+      - goos: darwin
+        goarch: arm64
+        # No macOS/arm64 skip rule today; included for parity with linux.
+
+# Archive layout — one tar.gz per (os, arch).
+archives:
+  - id: default
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+      - src: contrib/systemd/pp-master.service
+        dst: contrib/systemd/pp-master.service
+      - src: contrib/systemd/pp-agent.service
+        dst: contrib/systemd/pp-agent.service
+      # Renamed in the archive so users always see the same path
+      # regardless of the source layout.
+      - src: hack/get.sh
+        dst: install.sh
+      - src: hack/render-unit.sh
+        dst: render-unit.sh
+    # tar.gz is universally unpacked; zip is friendlier for Windows but
+    # we don't ship that today. If you add windows, also add `formats: [zip]`.
+
+# SHA-256 checksums + a single checksums.txt covering all artifacts.
+checksum:
+  name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
+  algorithm: sha256
+
+# Strip the VCS info that Go would otherwise embed.
+git:
+  # Ignore the v* tag we just pushed (otherwise the changelog includes
+  # the release commit itself).
+  ignore_tags: []
+
+# Pretty release notes grouped from conventional commits. If you don't
+# follow conventional commits, just leave the body alone — GoReleaser
+# falls back to a flat list of commits.
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^chore:'
+      - '^ci:'
+      - '^test:'
+  groups:
+    - title: Features
+      order: 0
+      regexp: '^.*?feat(\(.+\))?(\!)?:'
+    - title: 'Bug fixes'
+      order: 1
+      regexp: '^.*?fix(\(.+\))?(\!)?:'
+    - title: 'Performance improvements'
+      order: 2
+      regexp: '^.*?perf(\(.+\))?(\!)?:'
+    - title: Refactors
+      order: 3
+      regexp: '^.*?refactor(\(.+\))?(\!)?:'
+    - title: Others
+      order: 999
+      regexp: '.*'
+
+# Publish to GitHub Releases on tag push. Disabled by default in
+# `--snapshot` mode and in PR smoke gates via the workflow's
+# `--skip publish`.
+release:
+  github:
+    owner: lbt05
+    name: PumpkinPie
+  draft: false
+  prerelease: auto
+  # Use the same name template as the archive; a single tag per release.
+  name_template: '{{ .ProjectName }} {{ .Version }}'
+  header: |
+    ## pumpkinPie {{ .Version }}
+
+    See the [README](https://github.com/lbt05/PumpkinPie#readme) for
+    install / upgrade instructions.
+
+    ```bash
+    # One-liner install (master)
+    curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh | sudo bash -s -- master
+    ```
+
+  footer: |
+    ## Verifying the download
+
+    ```bash
+    grep pumpkinpie_{{.Version}}_SHA256SUMS pumpkinpie_{{.Version}}_checksums.txt | sha256sum -c -
+    ```

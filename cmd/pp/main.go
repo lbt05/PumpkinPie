@@ -4,18 +4,28 @@
 //	pp master   run the central control plane (UI + API + gRPC + reverse proxy)
 //	pp agent    run a node agent that registers to a master
 //	pp version  print version info
+//
+// Build-time metadata is injected via -ldflags (see Makefile and
+// .goreleaser.yml). When built from a plain `go build`, the values
+// default to "dev" / "unknown" so the binary still works.
 package main
 
 import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/pumpkinpie/pumpkinpie/internal/cmd/agent"
 	"github.com/pumpkinpie/pumpkinpie/internal/cmd/master"
 )
 
-const version = "0.1.0"
+// These three vars are populated by `-ldflags "-X ..."` at link time.
+var (
+	Version   = "dev"
+	Commit    = "unknown"
+	BuildTime = "unknown"
+)
 
 func main() {
 	if len(os.Args) < 2 {
@@ -33,7 +43,11 @@ func main() {
 	case "agent":
 		err = agentcmd.Run(ctx, args)
 	case "version", "-v", "--version":
-		fmt.Printf("pp %s\n", version)
+		fmt.Printf("pp %s\n", Version)
+		fmt.Printf("  commit:     %s\n", Commit)
+		fmt.Printf("  built:      %s\n", BuildTime)
+		fmt.Printf("  go version: %s\n", runtime.Version())
+		fmt.Printf("  platform:   %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		return
 	case "help", "-h", "--help":
 		usage()

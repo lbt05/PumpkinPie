@@ -43,7 +43,62 @@ tunneled over gRPC to the right node.
 4. **Unified container list** — every container on every node is visible in
    a single table with state, status, assigned node, and public URL.
 
-## Quick start
+## Install (recommended)
+
+The `pp` binary is statically linked, has the web UI embedded, and
+needs no runtime dependencies. A one-liner downloads the latest
+release from GitHub, verifies the SHA-256, installs the binary, and
+sets up a systemd unit.
+
+### Master
+
+```bash
+curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
+  | sudo bash -s -- master
+```
+
+Open <http://localhost:8080/console/>. Status:
+
+```bash
+systemctl status pp-master
+journalctl -u pp-master -f
+```
+
+### Agent (on every worker host)
+
+```bash
+PP_MASTER_ADDR=master.example.com:7000 \
+  curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
+  | sudo bash -s -- agent
+```
+
+The agent needs Docker access and runs as `root` so it can talk to
+`/var/run/docker.sock`. Use `DOCKER_SOCK=...` (env var) or the
+`pp-docker-sock` argument if your socket lives elsewhere.
+
+### Pinning a version
+
+```bash
+curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
+  | sudo bash -s -- master --version v0.1.0
+```
+
+The script is signed only by the GitHub TLS certificate — for
+stronger supply-chain guarantees, verify the SHA-256 in
+`pumpkinpie_v0.1.0_checksums.txt` (linked from the release page) by
+hand or wire it into your provisioning tool.
+
+### macOS (binary only, no systemd)
+
+```bash
+curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
+  | sudo bash -s -- master --no-systemd
+pp master --http=:8080 --grpc=:7000 --db=./pp.db
+```
+
+## Build from source
+
+If you'd rather compile from source, or you need a custom patch:
 
 ### 0. Install build dependencies
 
@@ -105,6 +160,10 @@ If you only want the Go binary (no UI bundle):
 make build         # just bin/pp
 ```
 
+`make build` also injects version metadata into the binary via `-ldflags`.
+Override the version with `make build VERSION=v0.1.0`. Print the
+resulting binary's version with `pp version`.
+
 ### 2. Start the Master
 
 ```bash
@@ -135,13 +194,13 @@ The agent discovers the Docker socket in this order:
 ./bin/pp agent --master=master.example.com:7000 --name=node-A
 
 # Linux with rootless Docker
-DOCKER_SOCK=$XDG_RUNTIME_DIR/docker.sock ./bin/pp agent --master=... --name=node-A
+DOCKER_SOCK=$XDG_RUNTIME_DIR/docker.sock ./bin/pp agent --master=... --name=...
 
 # macOS Docker Desktop
-DOCKER_SOCK=$HOME/.docker/run/docker.sock ./bin/pp agent --master=... --name=node-A
+DOCKER_SOCK=$HOME/.docker/run/docker.sock ./bin/pp agent --master=... --name=...
 
 # Remote Docker daemon
-DOCKER_HOST=tcp://docker-host:2375 ./bin/pp agent --master=... --name=node-A
+DOCKER_HOST=tcp://docker-host:2375 ./bin/pp agent --master=... --name=...
 ```
 
 Within ~5 seconds the node cards should appear in the dashboard with live
@@ -154,11 +213,11 @@ metrics.
 ```
 pp master [flags]   # control plane: UI + API + gRPC + reverse proxy
 pp agent  [flags]   # node agent: registers to master, hosts containers
-pp version          # print version
+pp version          # print version, commit, build time
 pp help             # print usage
 ```
 
-Run `pp <subcommand> -h` to see flags for a subcommand.
+Run `pp <subcommand> -h` to see flags for that subcommand.
 
 ### 4. Create a container
 
@@ -294,9 +353,12 @@ Docker daemon on each GPU node.
 
 ## Running as a systemd service
 
-Production deployments should run `pp master` and `pp agent` under
-systemd so they auto-start on boot and recover from crashes. Two unit
-files are provided in [`contrib/systemd/`](contrib/systemd/):
+If you used the [Install (recommended)](#install-recommended) section,
+your `pp-master` / `pp-agent` units are already installed and running.
+This section is for the source-build path: build the binary, drop it
+in `/usr/local/bin`, then run the systemd install script.
+
+Two unit files ship in [`contrib/systemd/`](contrib/systemd/):
 
 | File | Purpose |
 |---|---|
