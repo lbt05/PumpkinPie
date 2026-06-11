@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -93,16 +94,9 @@ func (c *Collector) diskStats() []*pb.DiskStats {
 	if err != nil {
 		return nil
 	}
-	seen := map[string]bool{}
-	out := make([]*pb.DiskStats, 0, len(parts))
-	for _, p := range parts {
-		if seen[p.Mountpoint] {
-			continue
-		}
-		seen[p.Mountpoint] = true
-		if isIgnoredMount(p.Mountpoint) {
-			continue
-		}
+	kept := filterPartitions(parts)
+	out := make([]*pb.DiskStats, 0, len(kept))
+	for _, p := range kept {
 		usage, err := disk.Usage(p.Mountpoint)
 		if err != nil || usage == nil {
 			continue
@@ -117,14 +111,79 @@ func (c *Collector) diskStats() []*pb.DiskStats {
 	return out
 }
 
+// filterPartitions drops mounts we never want to report (container
+// runtime overlays, snap squashfs, network shares, kernel pseudo-FS,
+// etc.) and deduplicates the survivors by underlying device so a
+// single physical disk reachable via multiple bind mounts / APFS
+// firmlinks reports exactly once. Pulled out as a pure function so
+// the platform-specific gopsutil call site stays small and the
+// filtering is unit-testable.
+func filterPartitions(parts []disk.PartitionStat) []disk.PartitionStat {
+	// 1. drop by mountpoint prefix and by fstype.
+	keep := make([]disk.PartitionStat, 0, len(parts))
+	for _, p := range parts {
+		if isIgnoredMount(p.Mountpoint) || isIgnoredFstype(p.Fstype) {
+			continue
+		}
+		keep = append(keep, p)
+	}
+	// 2. dedup by device, preferring the shortest mountpoint
+	//    (canonical mount usually wins over bind targets / firmlinks).
+	//    Devices reported as empty string get a per-mount synthetic key
+	//    so we don't accidentally collapse unrelated FUSE-style mounts.
+	best := make(map[string]disk.PartitionStat, len(keep))
+	for _, p := range keep {
+		key := p.Device
+		if key == "" {
+			key = "\x00mp:" + p.Mountpoint
+		}
+		if cur, ok := best[key]; !ok || len(p.Mountpoint) < len(cur.Mountpoint) {
+			best[key] = p
+		}
+	}
+	// 3. stable output by mountpoint so reports / UI rows don't flap.
+	out := make([]disk.PartitionStat, 0, len(best))
+	for _, p := range best {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Mountpoint < out[j].Mountpoint })
+	return out
+}
+
 // ignoredMountPrefixes are container/runtime/transient mounts whose disk
 // usage just mirrors something we already report (or is noise), so we
 // drop them to keep the per-node disk list small and meaningful.
 var ignoredMountPrefixes = []string{
+	// container / orchestrator state — these live on the same disk as /
+	// and just inflate the partition list with one entry per container
+	// layer / pod volume.
 	"/var/lib/kubelet",
 	"/var/lib/docker",
+	"/var/lib/containerd",
+	"/var/lib/containers",
+	"/var/lib/rancher",
+
+	// snap packages and their per-snap data dirs.
+	"/snap",
+	"/var/snap",
+	"/var/lib/snapd",
+
+	// boot / runtime / kernel pseudo-FS (most of these are filtered by
+	// disk.Partitions(false), but keep them as defense-in-depth).
 	"/boot",
 	"/run",
+	"/proc",
+	"/sys",
+	"/dev",
+
+	// macOS APFS metadata volumes that appear as separate mountpoints
+	// but carry no user-visible data worth tracking.
+	"/System/Volumes/Preboot",
+	"/System/Volumes/Update",
+	"/System/Volumes/VM",
+	"/System/Volumes/xarts",
+	"/System/Volumes/Hardware",
+	"/System/Volumes/iSCPreboot",
 }
 
 func isIgnoredMount(mp string) bool {
@@ -134,6 +193,38 @@ func isIgnoredMount(mp string) bool {
 		}
 	}
 	return false
+}
+
+// ignoredFstypes covers filesystem types that gopsutil's Partitions(false)
+// still returns even though they're never useful to report:
+//   - squashfs / iso9660 / udf: read-only image filesystems (snap packages,
+//     loop-mounted ISOs). All show 100% used.
+//   - overlay / overlay2 / aufs: container layer FS — same data as the
+//     underlying disk, double-counted.
+//   - fuse.snapfuse / fuse.portal / fuse.gvfsd-fuse: desktop FUSE shims.
+//   - nfs / nfs4 / cifs / smbfs / 9p: network shares. disk.Usage() can
+//     block on stale mounts, and most operators don't want remote storage
+//     conflated with local capacity. Re-enable per-mount via prefix if
+//     you really care about a specific share.
+var ignoredFstypes = map[string]bool{
+	"squashfs":        true,
+	"iso9660":         true,
+	"udf":             true,
+	"overlay":         true,
+	"overlay2":        true,
+	"aufs":            true,
+	"fuse.snapfuse":   true,
+	"fuse.portal":     true,
+	"fuse.gvfsd-fuse": true,
+	"nfs":             true,
+	"nfs4":            true,
+	"cifs":            true,
+	"smbfs":           true,
+	"9p":              true,
+}
+
+func isIgnoredFstype(fs string) bool {
+	return ignoredFstypes[strings.ToLower(fs)]
 }
 
 // gpuStats uses nvidia-smi for simplicity. Returns zeros if no nvidia-smi.
