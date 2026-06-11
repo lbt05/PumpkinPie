@@ -43,6 +43,11 @@ message OpenTunnel {
   string            tunnel_id       = 1;
   uint32            container_port  = 2;
   string            container_id    = 3;
+  // host_port is the port the agent should dial on its own loopback
+  // (the "Y" in `docker run -p X:Y`). When 0, the agent falls back
+  // to querying Docker for the port it actually mapped. New masters
+  // always populate this so the agent skips the Docker lookup.
+  uint32            host_port       = 4;
 }
 
 // ---------- Registration ----------
@@ -124,6 +129,11 @@ message LoadAvg {
 message PortMapping {
   uint32            container_port  = 1;
   string            protocol        = 2; // tcp / udp
+  // host_port is the port Docker binds on the agent host. 0 means
+  // "use container_port" (mirrors `docker run -p X:X`). This is the
+  // agent-side port, NOT the master's proxy listener — the master
+  // tunnel still forwards to the agent's loopback at this port.
+  uint32            host_port       = 3;
 }
 
 message ResourceSpec {

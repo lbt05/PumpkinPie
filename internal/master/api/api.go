@@ -241,6 +241,12 @@ type createContainerReq struct {
 	PortMappings []struct {
 		ContainerPort uint32 `json:"container_port"`
 		Protocol      string `json:"protocol"`
+		// HostPort is the port Docker binds on the agent host (the "Y"
+		// in `docker run -p X:Y` where X is the agent listener and Y is
+		// the container port). 0 means "use ContainerPort" — matches
+		// Docker's own `-p 8888:8888` shorthand. This is NOT the master's
+		// proxy port; see ExternalPort below for that.
+		HostPort uint32 `json:"host_port"`
 	} `json:"port_mappings"`
 	CPUCores    float64 `json:"cpu_cores"`
 	MemoryBytes uint64  `json:"memory_bytes"`
@@ -348,15 +354,19 @@ func (s *Server) createContainer(c *gin.Context) {
 	containerName = sanitizeContainerName(containerName)
 
 	ports := make([]*pb.PortMapping, 0, len(req.PortMappings))
-	for _, p := range req.PortMappings {
-		proto := p.Protocol
-		if proto == "" {
-			proto = "tcp"
+	{
+		// Re-shape the anonymous struct into the named portMappingJSON
+		// so the helper can apply the host-port default uniformly
+		// regardless of where the input came from.
+		typed := make([]portMappingJSON, len(req.PortMappings))
+		for i, p := range req.PortMappings {
+			typed[i] = portMappingJSON{
+				ContainerPort: p.ContainerPort,
+				Protocol:      p.Protocol,
+				HostPort:      p.HostPort,
+			}
 		}
-		ports = append(ports, &pb.PortMapping{
-			ContainerPort: p.ContainerPort,
-			Protocol:      proto,
-		})
+		ports = portMappingsToProto(typed)
 	}
 
 	// Allocate external port (use the first container port's mapping)
@@ -464,7 +474,7 @@ func (s *Server) createContainer(c *gin.Context) {
 
 	// Register proxy route and bind the listener for this container's port.
 	if externalPort != 0 && len(ports) > 0 {
-		s.proxy.RegisterRoute(externalPort, containerID, target.ID, ports[0].ContainerPort)
+		s.proxy.RegisterRoute(externalPort, containerID, target.ID, ports[0].ContainerPort, ports[0].HostPort)
 		if err := s.proxy.BindPort(s.lifetime, externalPort); err != nil {
 			log.Printf("bind proxy port %d failed: %v (container %s)", externalPort, err, containerID)
 		}
@@ -689,14 +699,15 @@ func (s *Server) startContainer(c *gin.Context) {
 	// bookkeeping, so we re-register the route then ask it to bind.
 	if cc.ExternalPort != 0 {
 		port := cc.ExternalPort
-		var firstContainerPort uint32
+		var firstContainerPort, firstHostPort uint32
 		if len(cc.PortsJSON) > 0 {
 			var ports []portMappingJSON
 			if err := json.Unmarshal([]byte(cc.PortsJSON), &ports); err == nil && len(ports) > 0 {
 				firstContainerPort = ports[0].ContainerPort
+				firstHostPort = ports[0].HostPort
 			}
 		}
-		s.proxy.RegisterRoute(port, cc.ID, cc.NodeID, firstContainerPort)
+		s.proxy.RegisterRoute(port, cc.ID, cc.NodeID, firstContainerPort, firstHostPort)
 		if err := s.proxy.BindPort(s.lifetime, port); err != nil {
 			log.Printf("rebind proxy port %d after start failed: %v", port, err)
 		}

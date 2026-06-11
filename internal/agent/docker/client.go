@@ -114,7 +114,16 @@ func (c *Client) Create(ctx context.Context, cmd *pb.CreateContainerCommand) (st
 		}
 		key := fmt.Sprintf("%d/%s", p.ContainerPort, proto)
 		exposed[key] = struct{}{}
-		portBindings[key] = []map[string]string{{"HostIp": "127.0.0.1", "HostPort": "0"}}
+		// HostPort is the port Docker binds on the agent host. The master
+		// defaults it to ContainerPort when the user didn't specify one
+		// (mirrors `docker run -p X:X`), so 0 here means a legacy caller
+		// that pre-dates the field — fall back to Docker picking an
+		// ephemeral port so we never silently bind 0 on the host.
+		hostPort := p.HostPort
+		if hostPort == 0 {
+			hostPort = p.ContainerPort
+		}
+		portBindings[key] = []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprintf("%d", hostPort)}}
 	}
 
 	body := map[string]any{

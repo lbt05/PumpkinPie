@@ -280,16 +280,42 @@ func (a *Agent) runTunnel(ctx context.Context, cmd *pb.OpenTunnel, t *tunnel) {
 	defer close(t.finished)
 	defer a.removeTunnel(cmd.TunnelId)
 
-	// Find docker container ID for this master container_id, then its mapped port.
-	dockerID, hostPort, err := a.resolveContainerHostPort(cmd.ContainerId, uint16(cmd.ContainerPort))
-	if err != nil {
-		log.Printf("tunnel %s resolve: %v", cmd.TunnelId, err)
-		_ = a.send(&pb.AgentMessage{
-			Payload: &pb.AgentMessage_ProxyClose{ProxyClose: &pb.ProxyTunnelClose{
-				TunnelId: cmd.TunnelId, Reason: "resolve: " + err.Error(),
-			}},
-		})
-		return
+	// Prefer the host_port the master told us about — it knows the
+	// value from the create request and we just told Docker to bind
+	// that exact number, so we can skip the Docker port-mapping query.
+	// Fall back to a Docker lookup when host_port is 0 (legacy master
+	// that pre-dates the field).
+	var (
+		dockerID string
+		hostPort uint16
+	)
+	if cmd.HostPort != 0 {
+		hostPort = uint16(cmd.HostPort)
+		// Still need the docker ID for the log line; cheap because the
+		// result is cached by gopsutil's ListAgent path.
+		var err error
+		dockerID, err = a.lookupDockerID(cmd.ContainerId)
+		if err != nil {
+			log.Printf("tunnel %s resolve (no docker lookup, host_port=%d): %v", cmd.TunnelId, hostPort, err)
+			_ = a.send(&pb.AgentMessage{
+				Payload: &pb.AgentMessage_ProxyClose{ProxyClose: &pb.ProxyTunnelClose{
+					TunnelId: cmd.TunnelId, Reason: "resolve: " + err.Error(),
+				}},
+			})
+			return
+		}
+	} else {
+		var err error
+		dockerID, hostPort, err = a.resolveContainerHostPort(cmd.ContainerId, uint16(cmd.ContainerPort))
+		if err != nil {
+			log.Printf("tunnel %s resolve: %v", cmd.TunnelId, err)
+			_ = a.send(&pb.AgentMessage{
+				Payload: &pb.AgentMessage_ProxyClose{ProxyClose: &pb.ProxyTunnelClose{
+					TunnelId: cmd.TunnelId, Reason: "resolve: " + err.Error(),
+				}},
+			})
+			return
+		}
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", hostPort)
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
@@ -363,6 +389,23 @@ func (a *Agent) resolveContainerHostPort(containerID string, containerPort uint1
 		}
 	}
 	return "", 0, fmt.Errorf("container %s not found locally", containerID)
+}
+
+// lookupDockerID returns just the docker container id for a master
+// container_id, without doing a Docker port-mapping query. Used when
+// the master already supplied the agent-side host port in OpenTunnel
+// and we only need the docker id for logging / correlation.
+func (a *Agent) lookupDockerID(containerID string) (string, error) {
+	cs, err := a.docker.ListAgent(context.Background())
+	if err != nil {
+		return "", err
+	}
+	for _, ci := range cs {
+		if ci.ContainerId == containerID {
+			return ci.DockerId, nil
+		}
+	}
+	return "", fmt.Errorf("container %s not found locally", containerID)
 }
 
 func (a *Agent) handleProxyDataFromMaster(d *pb.ProxyTunnelData) {

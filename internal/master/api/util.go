@@ -3,7 +3,6 @@ package api
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"net"
 	"strconv"
 	"strings"
@@ -103,22 +102,32 @@ func sanitizeContainerName(s string) string {
 type portMappingJSON struct {
 	ContainerPort uint32 `json:"container_port"`
 	Protocol      string `json:"protocol"`
+	// HostPort is the port Docker binds on the agent host (the "Y" in
+	// `docker run -p X:Y` where X is the agent listener and Y is the
+	// container port). 0 means "use ContainerPort" — matches Docker's
+	// own `-p 8888:8888` shorthand.
+	HostPort uint32 `json:"host_port"`
 }
 
-func parsePorts(s string) ([]portMappingJSON, error) {
-	var out []portMappingJSON
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func asProto(in []portMappingJSON) []*pb.PortMapping {
+// portMappingsToProto converts user-supplied port mappings into the
+// proto representation sent to the agent. It fills in any unspecified
+// HostPort (0) with the container port — the shorthand `docker run -p
+// 8888:8888` shape. Protocol defaults to "tcp" when empty.
+func portMappingsToProto(in []portMappingJSON) []*pb.PortMapping {
 	out := make([]*pb.PortMapping, 0, len(in))
 	for _, p := range in {
+		proto := p.Protocol
+		if proto == "" {
+			proto = "tcp"
+		}
+		hostPort := p.HostPort
+		if hostPort == 0 {
+			hostPort = p.ContainerPort
+		}
 		out = append(out, &pb.PortMapping{
 			ContainerPort: p.ContainerPort,
-			Protocol:      p.Protocol,
+			Protocol:      proto,
+			HostPort:      hostPort,
 		})
 	}
 	return out

@@ -27,7 +27,7 @@ const form = ref({
   cmd: '',
   envText: '',
   volumeBinds: '',
-  ports: [{ container_port: 80, protocol: 'tcp' }] as PortMapping[],
+  ports: [{ container_port: 80, host_port: 0, protocol: 'tcp' }] as PortMapping[],
   cpuCores: 0,
   memoryMb: 0,
   gpuCount: 0,
@@ -123,7 +123,7 @@ function toggleIndex(i: number, held: boolean) {
   arr.sort((a, b) => a - b)
 }
 
-function addPort() { form.value.ports.push({ container_port: 80, protocol: 'tcp' }) }
+function addPort() { form.value.ports.push({ container_port: 80, host_port: 0, protocol: 'tcp' }) }
 function removePort(i: number) { form.value.ports.splice(i, 1) }
 function incPort(i: number) {
   form.value.ports[i].container_port = Math.min(65535, (form.value.ports[i].container_port || 0) + 1)
@@ -290,8 +290,12 @@ const gpuAutoHint = computed(() => {
               <div v-for="(p, i) in form.ports" :key="i" class="field-row">
                 <div class="numstep" style="width: 140px;">
                   <button type="button" @click="decPort(i)">−</button>
-                  <input v-model.number="p.container_port" type="number" min="1" max="65535" step="1" />
+                  <input v-model.number="p.container_port" type="number" min="1" max="65535" step="1" :title="t('createContainer.portContainerTitle')" />
                   <button type="button" @click="incPort(i)">＋</button>
+                </div>
+                <span class="arrow" aria-hidden="true">→</span>
+                <div class="numstep" style="width: 140px;">
+                  <input v-model.number="p.host_port" type="number" min="0" max="65535" step="1" :placeholder="String(p.container_port || '')" :title="t('createContainer.portHostTitle')" />
                 </div>
                 <select class="select" v-model="p.protocol" style="max-width: 120px;">
                   <option value="tcp">tcp</option>

@@ -122,11 +122,12 @@ func rebindExistingProxyRoutes(ctx context.Context, st *store.Store, px *proxy.S
 		var ports []struct {
 			ContainerPort uint32 `json:"container_port"`
 			Protocol      string `json:"protocol"`
+			HostPort      uint32 `json:"host_port"`
 		}
 		if err := json.Unmarshal([]byte(c.PortsJSON), &ports); err != nil || len(ports) == 0 {
 			continue
 		}
-		px.LoadExistingRoute(c.ExternalPort, c.ID, c.NodeID, ports[0].ContainerPort)
+		px.LoadExistingRoute(c.ExternalPort, c.ID, c.NodeID, ports[0].ContainerPort, ports[0].HostPort)
 		if err := px.BindPort(ctx, c.ExternalPort); err != nil {
 			log.Printf("[master] rebind :%d -> %s: %v", c.ExternalPort, c.ID, err)
 		}

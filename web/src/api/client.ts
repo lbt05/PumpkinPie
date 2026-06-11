@@ -56,7 +56,15 @@ export type Node = {
   gpus?: GpuDevice[]
 }
 
-export type PortMapping = { container_port: number; protocol: string }
+export type PortMapping = {
+  container_port: number
+  protocol: string
+  // host_port is the port Docker binds on the agent host (the "Y" in
+  // `docker run -p X:Y`). 0 / undefined means "use container_port" —
+  // matches Docker's own `-p 8888:8888` shorthand. This is NOT the
+  // master's external URL port; see `external_port` for that.
+  host_port?: number
+}
 
 export type Container = {
   id: string

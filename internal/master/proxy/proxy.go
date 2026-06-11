@@ -50,6 +50,12 @@ type routeEntry struct {
 	containerID   string
 	nodeID        string
 	containerPort uint32
+	// hostPort is the port Docker bound on the agent host. Sent to the
+	// agent in OpenTunnel so the agent can dial `127.0.0.1:hostPort`
+	// directly instead of reverse-querying Docker. 0 is allowed and
+	// means "fall back to Docker lookup" (legacy masters, or rows
+	// persisted before the field existed).
+	hostPort uint32
 }
 
 func New(mgr *agentmgr.Manager) *Server {
@@ -142,16 +148,20 @@ func (s *Server) makeHandler(port uint32) http.HandlerFunc {
 }
 
 // RegisterRoute stores the route for a port. Caller must have already
-// allocated the port and called BindPort.
-func (s *Server) RegisterRoute(port uint32, containerID, nodeID string, containerPort uint32) {
+// allocated the port and called BindPort. hostPort is the port Docker
+// bound on the agent host — passed verbatim in OpenTunnel so the agent
+// can skip its own Docker port-mapping lookup. 0 means "agent falls
+// back to Docker".
+func (s *Server) RegisterRoute(port uint32, containerID, nodeID string, containerPort, hostPort uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.routes[port] = &routeEntry{
 		containerID:   containerID,
 		nodeID:        nodeID,
 		containerPort: containerPort,
+		hostPort:      hostPort,
 	}
-	log.Printf("proxy: route :%d -> container %s on node %s (port %d)", port, containerID, nodeID, containerPort)
+	log.Printf("proxy: route :%d -> container %s on node %s (container %d / agent %d)", port, containerID, nodeID, containerPort, hostPort)
 }
 
 // UnregisterRoute removes the route and closes the listener for the port.
@@ -169,14 +179,18 @@ func (s *Server) UnregisterRoute(port uint32) uint32 {
 }
 
 // LoadExistingRoute registers a route at master startup from persisted
-// metadata, but does not bind the port (caller should BindPort).
-func (s *Server) LoadExistingRoute(port uint32, containerID, nodeID string, containerPort uint32) {
+// metadata, but does not bind the port (caller should BindPort). hostPort
+// is the agent-side port from the create request (now stored in
+// ports_json); pass 0 if not known — the agent will fall back to its
+// Docker lookup.
+func (s *Server) LoadExistingRoute(port uint32, containerID, nodeID string, containerPort, hostPort uint32) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.routes[port] = &routeEntry{
 		containerID:   containerID,
 		nodeID:        nodeID,
 		containerPort: containerPort,
+		hostPort:      hostPort,
 	}
 }
 
@@ -196,6 +210,7 @@ func (s *Server) bridge(clientConn net.Conn, sess *agentmgr.Session, rt *routeEn
 				TunnelId:      tunnelID,
 				ContainerPort: rt.containerPort,
 				ContainerId:   rt.containerID,
+				HostPort:      rt.hostPort,
 			},
 		},
 	}); err != nil {

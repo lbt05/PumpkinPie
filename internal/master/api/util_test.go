@@ -1,8 +1,11 @@
 package api
 
 import (
+	"reflect"
 	"regexp"
 	"testing"
+
+	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
 )
 
 func TestAutoName(t *testing.T) {
@@ -99,5 +102,26 @@ func TestSanitizeContainerName_Truncates(t *testing.T) {
 	}
 	if !regexp.MustCompile(`-[0-9a-f]{6}$`).MatchString(got) {
 		t.Errorf("truncated name should end in -<6hex>: %q", got)
+	}
+}
+
+func TestPortMappingsToProto_DefaultsHostPortToContainerPort(t *testing.T) {
+	// Mirrors `docker run -p X:X` shorthand: when the user doesn't pin
+	// a host port, the agent should bind the same number as the
+	// container port. The API enforces this default server-side so the
+	// frontend doesn't have to send the field at all.
+	in := []portMappingJSON{
+		{ContainerPort: 8888, Protocol: "tcp", HostPort: 0},
+		{ContainerPort: 53, Protocol: "udp", HostPort: 5353}, // user pinned a different one
+		{ContainerPort: 9000, Protocol: "", HostPort: 9001},   // empty protocol -> tcp
+	}
+	got := portMappingsToProto(in)
+	want := []*pb.PortMapping{
+		{ContainerPort: 8888, Protocol: "tcp", HostPort: 8888},
+		{ContainerPort: 53, Protocol: "udp", HostPort: 5353},
+		{ContainerPort: 9000, Protocol: "tcp", HostPort: 9001},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("portMappingsToProto = %+v, want %+v", got, want)
 	}
 }
