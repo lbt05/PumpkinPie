@@ -13,7 +13,7 @@
 #   --bin <path>             where to install the binary      (default: /usr/local/bin/pp)
 #   --http <addr>            master: HTTP listen addr         (default: 0.0.0.0:8080)
 #   --grpc <addr>            master: gRPC listen addr         (default: 0.0.0.0:7000)
-#   --master <host:port>     agent: master address to dial    (default: pp-master.internal:7000)
+#   --master-ip <host:port>  agent: master address to dial    (default: pp-master.internal:7000)
 #   --name <hostname>        agent: node name                 (default: %H)
 #   --no-systemd             install binary only, skip unit
 #   --dry-run                show what would happen, don't install
@@ -68,7 +68,7 @@ Flags (after the role):
   --bin <path>             where to install the binary      (default: /usr/local/bin/pp)
   --http <addr>            master: HTTP listen addr         (default: 0.0.0.0:8080)
   --grpc <addr>            master: gRPC listen addr         (default: 0.0.0.0:7000)
-  --master <host:port>     agent: master address to dial    (default: pp-master.internal:7000)
+  --master-ip <host:port>  agent: master address to dial    (default: pp-master.internal:7000)
   --name <hostname>        agent: node name                 (default: %H)
   --no-systemd             install binary only, skip unit
   --dry-run                show what would happen, don't install
@@ -91,7 +91,7 @@ while [[ $# -gt 0 ]]; do
     --state-dir)    PP_STATE_DIR="$2"; shift 2 ;;
     --http)         PP_HTTP="$2"; shift 2 ;;
     --grpc)         PP_GRPC="$2"; shift 2 ;;
-    --master)       PP_MASTER_ADDR="$2"; shift 2 ;;
+    --master-ip)    PP_MASTER_ADDR="$2"; shift 2 ;;
     --name)         PP_NAME="$2"; shift 2 ;;
     --no-systemd)   PP_NO_SYSTEMD=1; shift ;;
     --prerelease)   PP_PRERELEASE=1; shift ;;

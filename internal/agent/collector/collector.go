@@ -100,6 +100,9 @@ func (c *Collector) diskStats() []*pb.DiskStats {
 			continue
 		}
 		seen[p.Mountpoint] = true
+		if isIgnoredMount(p.Mountpoint) {
+			continue
+		}
 		usage, err := disk.Usage(p.Mountpoint)
 		if err != nil || usage == nil {
 			continue
@@ -112,6 +115,25 @@ func (c *Collector) diskStats() []*pb.DiskStats {
 		})
 	}
 	return out
+}
+
+// ignoredMountPrefixes are container/runtime/transient mounts whose disk
+// usage just mirrors something we already report (or is noise), so we
+// drop them to keep the per-node disk list small and meaningful.
+var ignoredMountPrefixes = []string{
+	"/var/lib/kubelet",
+	"/var/lib/docker",
+	"/boot",
+	"/run",
+}
+
+func isIgnoredMount(mp string) bool {
+	for _, p := range ignoredMountPrefixes {
+		if mp == p || strings.HasPrefix(mp, p+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // gpuStats uses nvidia-smi for simplicity. Returns zeros if no nvidia-smi.
