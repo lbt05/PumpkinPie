@@ -1,0 +1,163 @@
+/* ============================================================
+   pumpkinPie — design tokens
+   Dark default; light theme via [data-theme="light"] on <html>.
+   Token names match the original style.css to keep the
+   diff small. New tokens are additive.
+   ============================================================ */
+
+:root {
+  /* ---- Canvas ---- */
+  --bg:           #0c0e13;   /* app background — deeper than #0f1115 */
+  --bg-soft:      #141821;   /* sidebar, metric tile fill */
+  --bg-card:      #1a1f2c;   /* cards, table rows */
+  --bg-elev:      #232938;   /* hover / active surface */
+  --bg-inset:     #0a0c11;   /* gauge wells, code blocks */
+
+  /* ---- Lines ---- */
+  --border:       #262c3b;
+  --border-soft:  #1d2230;
+  --border-strong:#3a4255;
+
+  /* ---- Type ---- */
+  --text:         #e8ebf2;
+  --text-dim:     #9aa3b2;
+  --text-faint:   #5b6473;
+  --text-on-accent:#1a0f08;
+
+  /* ---- Brand ---- */
+  --accent:       #ff8a3d;   /* pumpkin orange (kept from current) */
+  --accent-hover: #ffa05a;
+  --accent-soft:  #3a230f;   /* active nav fill, gpu-card selected */
+  --accent-glow:  rgba(255, 138, 61, 0.35);
+
+  /* ---- Semantic status ---- */
+  --success:      #4caf50;
+  --success-soft: #14331a;
+  --warn:         #f0a93b;
+  --warn-soft:    #3a2810;
+  --danger:       #ef5350;
+  --danger-soft:  #3a1414;
+
+  /* ---- Per-metric colors (used in chart + bars) ---- */
+  --metric-cpu:   #ff8a3d;   /* orange = CPU */
+  --metric-mem:   #42a5f5;   /* blue  = Memory */
+  --metric-gpu:   #ab47bc;   /* purple= GPU */
+  --metric-net:   #26c6da;   /* cyan  = Network (reserved) */
+
+  /* ---- Typography ---- */
+  --font-display: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+                  "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-body:    -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+                  "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono:    ui-monospace, "JetBrains Mono", "SF Mono", "IBM Plex Mono",
+                  Menlo, Consolas, monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 20px;
+  --fs-2xl: 24px;
+  --fs-3xl: 32px;
+  --fs-hero: 48px;
+  --fs-display: 64px;
+
+  --lh-tight: 1.15;
+  --lh-snug:  1.35;
+  --lh-base:  1.55;
+
+  /* ---- Spacing ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+  --sp-9: 56px;
+  --sp-10: 72px;
+
+  /* ---- Radius ---- */
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --r-4: 12px;
+  --r-5: 16px;
+  --r-pill: 999px;
+
+  /* ---- Shadow ---- */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55);
+  --shadow-glow: 0 0 0 1px var(--accent-glow), 0 0 24px var(--accent-glow);
+
+  /* ---- Motion ---- */
+  --t-fast: 120ms cubic-bezier(0.2, 0, 0, 1);
+  --t-base: 180ms cubic-bezier(0.2, 0, 0, 1);
+  --t-slow: 280ms cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---- Layout ---- */
+  --sidebar-w: 220px;
+  --sidebar-w-collapsed: 64px;
+  --header-h: 64px;
+  --maxw: 1440px;
+
+  color-scheme: dark;
+}
+
+/* ============================================================
+   Light theme — opt-in via [data-theme="light"]
+   ============================================================ */
+[data-theme="light"] {
+  --bg:           #f6f7f9;
+  --bg-soft:      #ffffff;
+  --bg-card:      #ffffff;
+  --bg-elev:      #eef0f4;
+  --bg-inset:     #eceff4;
+
+  --border:       #e3e6ec;
+  --border-soft:  #edeff3;
+  --border-strong:#cdd2db;
+
+  --text:         #14181f;
+  --text-dim:     #5b6473;
+  --text-faint:   #9aa3b2;
+  --text-on-accent:#ffffff;
+
+  --accent:       #e96a16;   /* slightly darker for contrast on white */
+  --accent-hover: #d25c0e;
+  --accent-soft:  #fde6d4;
+  --accent-glow:  rgba(233, 106, 22, 0.25);
+
+  --success:      #2e7d32;
+  --success-soft: #e6f4e7;
+  --warn:         #c98215;
+  --warn-soft:    #fbf1de;
+  --danger:       #c62828;
+  --danger-soft:  #fbe6e6;
+
+  --metric-cpu:   #e96a16;
+  --metric-mem:   #1e88e5;
+  --metric-gpu:   #8e24aa;
+  --metric-net:   #00838f;
+
+  --shadow-sm: 0 1px 2px rgba(20, 24, 31, 0.06);
+  --shadow-md: 0 4px 12px rgba(20, 24, 31, 0.08);
+  --shadow-lg: 0 16px 40px rgba(20, 24, 31, 0.12);
+  --shadow-glow: 0 0 0 1px var(--accent-glow), 0 0 18px var(--accent-glow);
+
+  color-scheme: light;
+}
+
+/* ============================================================
+   Reduced motion
+   ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -5,13 +5,14 @@ import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import {
   createContainer,
-  listNodes,
+  fmtBytes,
   listNodeGPUs,
+  listNodes,
+  stateClass,
   type CreateContainerPayload,
   type Node,
   type NodeGPUDevice,
   type PortMapping,
-  fmtBytes,
 } from '@/api/client'
 
 const router = useRouter()
@@ -25,127 +26,110 @@ const form = ref({
   name: '',
   cmd: '',
   envText: '',
+  volumeBinds: '',
   ports: [{ container_port: 80, protocol: 'tcp' }] as PortMapping[],
-  cpu_cores: 0,
-  memory_mb: 0,
-  gpu_count: 0,
-  gpu_mode: 'auto' as GpuMode,
-  gpu_indices: [] as number[],
-  node_id: '' as string,
+  cpuCores: 0,
+  memoryMb: 0,
+  gpuCount: 0,
+  gpuMode: 'auto' as GpuMode,
+  gpuIndices: [] as number[],
+  nodeId: '' as string,
   pull: true,
-  volume_binds: '',
 })
-
 const submitting = ref(false)
 const result = ref<{ container: any; external_url?: string; node: { name: string }; gpu_indices?: number[] } | null>(null)
 const gpuDevices = ref<NodeGPUDevice[]>([])
 const loadingDevices = ref(false)
+const pickedNode = ref<string>('')
 
 onMounted(async () => {
-  try {
-    nodes.value = await listNodes()
-  } catch (e) {
-    console.warn(e)
-  }
+  try { nodes.value = await listNodes() } catch {}
 })
 
 const onlineNodes = computed(() => nodes.value.filter((n) => n.state === 'online'))
+const gpuNodes = computed(() => onlineNodes.value.filter((n) => (n.gpu_count || 0) > 0))
+const totalGpuFree = computed(() => onlineNodes.value.reduce((s, n) => s + (n.gpu_free || 0), 0))
+const totalGpu = computed(() => onlineNodes.value.reduce((s, n) => s + (n.gpu_count || 0), 0))
 
-const clusterGpuTotal = computed(() => onlineNodes.value.reduce((s, n) => s + (n.gpu_count || 0), 0))
-const clusterGpuFree = computed(() =>
-  onlineNodes.value.reduce((s, n) => s + ((n.gpu_free ?? n.gpu_count) || 0), 0),
-)
-const gpuCapableNodes = computed(() => onlineNodes.value.filter((n) => (n.gpu_count || 0) > 0))
-
-const needsGpu = computed(() => form.value.gpu_count > 0 || form.value.gpu_mode === 'pick')
-
-// The list shown in the node picker. When the user wants GPUs we filter to
-// GPU-capable nodes (and additionally to those with enough free GPUs when
-// in auto mode and a count is set).
+const needsGpu = computed(() => form.value.gpuCount > 0 || form.value.gpuMode === 'pick')
 const pickerNodes = computed(() => {
   if (!needsGpu.value) return onlineNodes.value
-  const capable = gpuCapableNodes.value
-  if (form.value.gpu_mode === 'auto' && form.value.gpu_count > 0) {
-    return capable.filter((n) => (n.gpu_free ?? n.gpu_count) >= form.value.gpu_count)
+  if (form.value.gpuMode === 'auto' && form.value.gpuCount > 0) {
+    return gpuNodes.value.filter((n) => (n.gpu_free ?? n.gpu_count) >= form.value.gpuCount)
   }
-  return capable
+  return gpuNodes.value
 })
 
-const satisfyingNodeCount = computed(() => {
-  if (form.value.gpu_count <= 0) return onlineNodes.value.length
-  return gpuCapableNodes.value.filter((n) => (n.gpu_free ?? n.gpu_count) >= form.value.gpu_count).length
-})
-
-function nodeLabel(n: Node) {
+function nodeOptionLabel(n: Node) {
   if ((n.gpu_count || 0) > 0) {
-    return t('createContainer.nodeOptionGpu', {
-      name: n.name,
-      host: n.hostname,
-      cpu: n.cpu_percent.toFixed(0),
-      free: n.gpu_free ?? n.gpu_count,
-      total: n.gpu_count,
-    })
+    return `${n.name} · ${n.hostname} · CPU ${Math.round(n.cpu_percent || 0)}% · ${n.gpu_free || 0}/${n.gpu_count} GPU free`
   }
-  return t('createContainer.nodeOption', { name: n.name, host: n.hostname, cpu: n.cpu_percent.toFixed(0) })
+  return `${n.name} · ${n.hostname} · CPU ${Math.round(n.cpu_percent || 0)}%`
 }
 
+const qualifyCount = computed(() => {
+  if (form.value.gpuCount <= 0) return onlineNodes.value.length
+  return gpuNodes.value.filter((n) => (n.gpu_free ?? n.gpu_count) >= form.value.gpuCount).length
+})
+
 const canSubmit = computed(() => {
-  if (!form.value.image) return false
-  if (onlineNodes.value.length === 0) return false
-  if (form.value.gpu_mode === 'pick') {
-    return !!form.value.node_id && form.value.gpu_indices.length > 0
-  }
+  if (!form.value.image.trim()) return false
+  if (!onlineNodes.value.length) return false
+  if (form.value.gpuMode === 'pick' && (!form.value.nodeId || form.value.gpuIndices.length === 0)) return false
   return true
 })
 
 async function loadDevices() {
-  form.value.gpu_indices = []
+  form.value.gpuIndices = []
   gpuDevices.value = []
-  if (form.value.gpu_mode !== 'pick' || !form.value.node_id) return
+  if (form.value.gpuMode !== 'pick' || !form.value.nodeId) return
   loadingDevices.value = true
   try {
-    gpuDevices.value = await listNodeGPUs(form.value.node_id)
+    gpuDevices.value = await listNodeGPUs(form.value.nodeId)
   } catch (e: any) {
-    ElMessage.error(t('createContainer.gpuLoadFailed', { msg: e?.response?.data?.error || e?.message || '' }))
+    ElMessage({ type: 'error', message: t('createContainer.gpuLoadFailed', { msg: e?.response?.data?.error || e?.message || '' }) })
     gpuDevices.value = []
   } finally {
     loadingDevices.value = false
   }
 }
 
-watch(() => form.value.gpu_mode, async (mode) => {
+watch(() => form.value.gpuMode, async (mode) => {
   if (mode === 'pick') {
-    if (!form.value.node_id && gpuCapableNodes.value.length === 1) {
-      form.value.node_id = gpuCapableNodes.value[0].id
+    if (!form.value.nodeId && gpuNodes.value.length === 1) {
+      form.value.nodeId = gpuNodes.value[0].id
+      pickedNode.value = gpuNodes.value[0].id
     }
     await loadDevices()
   } else {
-    form.value.gpu_indices = []
+    form.value.gpuIndices = []
     gpuDevices.value = []
   }
 })
-
-watch(() => form.value.node_id, async () => {
-  if (form.value.gpu_mode === 'pick') await loadDevices()
+watch(() => form.value.nodeId, async () => {
+  pickedNode.value = form.value.nodeId
+  if (form.value.gpuMode === 'pick') await loadDevices()
+})
+watch(() => form.value.gpuIndices.length, (n) => {
+  if (form.value.gpuMode === 'pick') form.value.gpuCount = n
 })
 
-watch(() => form.value.gpu_indices.length, (n) => {
-  if (form.value.gpu_mode === 'pick') form.value.gpu_count = n
-})
-
-function toggleIndex(i: number, disabled: boolean) {
-  if (disabled) return
-  const arr = form.value.gpu_indices
+function toggleIndex(i: number, held: boolean) {
+  if (held) return
+  const arr = form.value.gpuIndices
   const at = arr.indexOf(i)
   if (at >= 0) arr.splice(at, 1)
   else arr.push(i)
+  arr.sort((a, b) => a - b)
 }
 
-function addPort() {
-  form.value.ports.push({ container_port: 80, protocol: 'tcp' })
+function addPort() { form.value.ports.push({ container_port: 80, protocol: 'tcp' }) }
+function removePort(i: number) { form.value.ports.splice(i, 1) }
+function incPort(i: number) {
+  form.value.ports[i].container_port = Math.min(65535, (form.value.ports[i].container_port || 0) + 1)
 }
-function removePort(i: number) {
-  form.value.ports.splice(i, 1)
+function decPort(i: number) {
+  form.value.ports[i].container_port = Math.max(1, (form.value.ports[i].container_port || 1) - 1)
 }
 
 async function submit() {
@@ -155,31 +139,32 @@ async function submit() {
     const payload: CreateContainerPayload = {
       image: form.value.image.trim(),
       name: form.value.name.trim() || undefined,
-      cmd: form.value.cmd
-        ? form.value.cmd.split(/\s+/).filter(Boolean)
-        : undefined,
-      env: form.value.envText
-        ? form.value.envText.split(/\n+/).map((l) => l.trim()).filter(Boolean)
-        : undefined,
+      cmd: form.value.cmd ? form.value.cmd.split(/\s+/).filter(Boolean) : undefined,
+      env: form.value.envText ? form.value.envText.split(/\n+/).map((l) => l.trim()).filter(Boolean) : undefined,
       port_mappings: form.value.ports.filter((p) => p.container_port > 0),
-      cpu_cores: form.value.cpu_cores || 0,
-      memory_bytes: form.value.memory_mb ? form.value.memory_mb * 1024 * 1024 : 0,
-      gpu_count: form.value.gpu_count || 0,
-      node_id: form.value.node_id || undefined,
+      cpu_cores: form.value.cpuCores || 0,
+      memory_bytes: form.value.memoryMb ? form.value.memoryMb * 1024 * 1024 : 0,
+      gpu_count: form.value.gpuCount || 0,
+      node_id: form.value.nodeId || undefined,
       pull: form.value.pull,
-      volume_binds: form.value.volume_binds
-        ? form.value.volume_binds.split(/\n+/).map((l) => l.trim()).filter(Boolean)
-        : undefined,
+      volume_binds: form.value.volumeBinds ? form.value.volumeBinds.split(/\n+/).map((l) => l.trim()).filter(Boolean) : undefined,
     }
-    if (form.value.gpu_mode === 'pick' && form.value.gpu_indices.length > 0) {
-      payload.gpu_indices = [...form.value.gpu_indices].sort((a, b) => a - b)
+    if (form.value.gpuMode === 'pick' && form.value.gpuIndices.length > 0) {
+      payload.gpu_indices = [...form.value.gpuIndices].sort((a, b) => a - b)
     }
     const r = await createContainer(payload)
     result.value = r.data
-    ElMessage.success(t('createContainer.success', { node: r.data.node.name }))
+    ElMessage({ type: 'success', message: t('createContainer.success') + ' — ' + r.data.node.name })
+    // Smooth-scroll to result
+    setTimeout(() => {
+      const el = document.getElementById('result-wrap')
+      if (el) {
+        const top = el.getBoundingClientRect().top
+        window.scrollTo({ top: window.scrollY + top - 80, behavior: 'smooth' })
+      }
+    }, 50)
   } catch (e: any) {
-    const msg = e?.response?.data?.error || e?.message || 'unknown error'
-    ElMessage.error(t('createContainer.failed', { msg }))
+    ElMessage({ type: 'error', message: t('createContainer.failed', { msg: e?.response?.data?.error || e?.message || 'unknown error' }) })
   } finally {
     submitting.value = false
   }
@@ -190,275 +175,314 @@ function reset() {
   form.value.name = ''
   form.value.cmd = ''
   form.value.envText = ''
-  form.value.volume_binds = ''
-  form.value.gpu_indices = []
+  form.value.volumeBinds = ''
+  form.value.gpuIndices = []
+  ElMessage({ type: 'info', message: t('createContainer.toastResetMsg') })
 }
 
-function stateLabel(s: string) {
-  return t(`state.${s}` as any, s)
-}
+const sumImage = computed(() => form.value.image.trim() || '—')
+const sumName = computed(() => form.value.name.trim() || t('createContainer.summaryAuto'))
+const sumPorts = computed(() => String(form.value.ports.length))
+const sumCpu = computed(() => form.value.cpuCores > 0 ? `${form.value.cpuCores} ${t('common.cores')}` : t('common.unlimited'))
+const sumMem = computed(() => form.value.memoryMb > 0 ? `${form.value.memoryMb} MB` : t('common.unlimited'))
+const sumGpu = computed(() => {
+  if (form.value.gpuCount === 0) return '0'
+  if (form.value.gpuMode === 'pick' && form.value.gpuIndices.length) {
+    return `${form.value.gpuCount} · GPU ${form.value.gpuIndices.join(', ')}`
+  }
+  return String(form.value.gpuCount)
+})
+const sumNode = computed(() => {
+  if (!form.value.nodeId) return t('createContainer.summaryAuto')
+  const n = nodes.value.find((x) => x.id === form.value.nodeId)
+  return n ? n.name : t('createContainer.summaryAuto')
+})
+const sumPull = computed(() => form.value.pull ? 'yes' : 'no')
+
+const schedHint = computed(() => {
+  if (form.value.gpuMode === 'pick' && !pickedNode.value) {
+    return { text: t('createContainer.schedPickNode'), warn: true }
+  }
+  if (form.value.gpuCount > 0 && form.value.gpuMode === 'auto' && !form.value.nodeId) {
+    return { text: t('createContainer.schedPinHint'), warn: true }
+  }
+  return { text: t('createContainer.schedEmpty'), warn: false }
+})
+
+const gpuAutoHint = computed(() => {
+  if (form.value.gpuCount === 0) return { text: t('createContainer.gpuAutoZero'), warn: false }
+  const qualify = gpuNodes.value.filter((n) => (n.gpu_free ?? n.gpu_count) >= form.value.gpuCount).length
+  const s = form.value.gpuCount !== 1 ? 's' : ''
+  return {
+    text: t('createContainer.gpuAutoQualify', { n: qualify, total: onlineNodes.value.length, count: form.value.gpuCount, s }),
+    warn: qualify === 0,
+  }
+})
 </script>
 
 <template>
   <div class="page">
-    <div class="page-header">
+    <header class="page-header">
       <div>
-        <h1 class="page-title">{{ t('createContainer.title') }}</h1>
-        <div class="page-subtitle">{{ t('createContainer.subtitle') }}</div>
+        <h1 class="page-title">{{ t('page.newContainer.title') }}</h1>
+        <p class="page-subtitle">
+          <span>{{ t('createContainer.subtitle') }}</span>
+          <span class="dot" />
+          <span>{{ t('createContainer.subtitleHint') }}</span>
+        </p>
       </div>
+      <div class="page-actions">
+        <button class="btn is-ghost" type="button" @click="router.push('/containers')">{{ t('createContainer.viewAll') }}</button>
+      </div>
+    </header>
+
+    <div v-if="!onlineNodes.length" class="empty">
+      <div class="ico" style="color: var(--danger); border-color: var(--danger);" aria-hidden="true">!</div>
+      <p class="empty-title" style="color: var(--danger);">{{ t('createContainer.noOnlineNodes') }}</p>
+      <p class="empty-hint">{{ t('createContainer.noOnlineNodesHint') }}</p>
     </div>
 
-    <div v-if="!onlineNodes.length" style="text-align:center;color:var(--text-dim);padding:48px 0;">
-      <el-icon :size="48" color="var(--red)"><WarningFilled /></el-icon>
-      <div style="margin-top:12px;">{{ t('createContainer.noOnlineNodes') }}</div>
-      <div style="margin-top:8px;font-size:12px;">{{ t('createContainer.noOnlineNodesHint') }}</div>
-    </div>
+    <div v-else class="create-layout">
+      <!-- ============ Form ============ -->
+      <form class="create-form" autocomplete="off" @submit.prevent="submit">
+        <!-- ----- Image & config ----- -->
+        <section class="form-section">
+          <div class="field">
+            <label class="field-label" for="f-image">
+              {{ t('createContainer.fieldImage') }} <span class="opt">{{ t('createContainer.fieldImageRequired') }}</span>
+            </label>
+            <input class="input mono" id="f-image" v-model="form.image" type="text" :placeholder="t('createContainer.fieldImagePlaceholder')" />
+            <p class="field-hint">{{ t('createContainer.fieldImageHint') }}</p>
+          </div>
 
-    <el-card v-else>
-      <el-form label-position="top" :model="form" v-loading="submitting">
-        <el-row :gutter="20">
-          <el-col :span="14">
-            <el-form-item :label="t('createContainer.fieldImage')" required>
-              <el-input v-model="form.image" :placeholder="t('createContainer.fieldImagePlaceholder')" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="10">
-            <el-form-item :label="t('createContainer.fieldName')">
-              <el-input v-model="form.name" :placeholder="t('createContainer.fieldNamePlaceholder')" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <el-form-item :label="t('createContainer.fieldCmd')">
-          <el-input v-model="form.cmd" :placeholder="t('createContainer.fieldCmdPlaceholder')" />
-        </el-form-item>
-
-        <el-form-item :label="t('createContainer.fieldEnv')">
-          <el-input
-            v-model="form.envText"
-            type="textarea"
-            :rows="3"
-            :placeholder="t('createContainer.fieldEnvPlaceholder')"
-          />
-        </el-form-item>
-
-        <el-form-item :label="t('createContainer.fieldVolumes')">
-          <el-input
-            v-model="form.volume_binds"
-            type="textarea"
-            :rows="2"
-            :placeholder="t('createContainer.fieldVolumesPlaceholder')"
-          />
-        </el-form-item>
-
-        <el-form-item :label="t('createContainer.fieldPorts')">
-          <div style="width:100%;">
-            <div v-for="(p, i) in form.ports" :key="i" style="display:flex;gap:8px;margin-bottom:6px;">
-              <el-input-number v-model="p.container_port" :min="1" :max="65535" />
-              <el-select v-model="p.protocol" style="width:120px;">
-                <el-option label="tcp" value="tcp" />
-                <el-option label="udp" value="udp" />
-              </el-select>
-              <el-button icon="Delete" circle @click="removePort(i)" :disabled="form.ports.length<=1" />
+          <div class="field-row">
+            <div class="field" style="flex: 1 1 220px;">
+              <label class="field-label" for="f-name">
+                {{ t('createContainer.fieldName') }} <span class="opt">{{ t('createContainer.fieldNameOptional') }}</span>
+              </label>
+              <input class="input" id="f-name" v-model="form.name" type="text" :placeholder="t('createContainer.fieldNamePlaceholder')" />
             </div>
-            <el-button icon="CirclePlus" size="small" @click="addPort">{{ t('createContainer.addPort') }}</el-button>
-            <span style="margin-left:12px;font-size:12px;color:var(--text-dim);">
-              {{ t('createContainer.portHint') }}
-            </span>
+            <div class="field" style="flex: 1 1 220px;">
+              <label class="field-label" for="f-cmd">
+                {{ t('createContainer.fieldCmd') }} <span class="opt">{{ t('createContainer.fieldNameOptional') }}</span>
+              </label>
+              <input class="input mono" id="f-cmd" v-model="form.cmd" type="text" :placeholder="t('createContainer.fieldCmdPlaceholder')" />
+            </div>
           </div>
-        </el-form-item>
 
-        <el-divider>{{ t('createContainer.dividerResources') }}</el-divider>
-
-        <el-row :gutter="20">
-          <el-col :span="8">
-            <el-form-item :label="t('createContainer.fieldCpu')">
-              <el-input-number v-model="form.cpu_cores" :min="0" :step="0.5" :precision="1" style="width:100%;" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item :label="t('createContainer.fieldMemory')">
-              <el-input-number v-model="form.memory_mb" :min="0" :step="64" style="width:100%;" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="8">
-            <el-form-item :label="t('createContainer.fieldPull')">
-              <el-switch v-model="form.pull" />
-            </el-form-item>
-          </el-col>
-        </el-row>
-
-        <el-divider>{{ t('createContainer.dividerGpu') }}</el-divider>
-
-        <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;">
-          {{ t('createContainer.clusterGpuSummary', {
-            free: clusterGpuFree,
-            total: clusterGpuTotal,
-            nodes: gpuCapableNodes.length,
-          }) }}
-        </div>
-
-        <el-form-item :label="t('createContainer.gpuMode')">
-          <el-radio-group v-model="form.gpu_mode">
-            <el-radio-button label="auto">{{ t('createContainer.gpuModeAuto') }}</el-radio-button>
-            <el-radio-button label="pick">{{ t('createContainer.gpuModePick') }}</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-
-        <el-form-item v-if="form.gpu_mode === 'auto'" :label="t('createContainer.fieldGpu')">
-          <el-input-number v-model="form.gpu_count" :min="0" :max="64" style="width:200px;" />
-          <span v-if="form.gpu_count > 0" style="margin-left:12px;font-size:12px;color:var(--text-dim);">
-            {{ t('createContainer.gpuSatisfyingNodes', {
-              n: satisfyingNodeCount,
-              total: onlineNodes.length,
-              count: form.gpu_count,
-            }) }}
-          </span>
-        </el-form-item>
-
-        <el-form-item v-else :label="t('createContainer.gpuPickHint')">
-          <div v-if="!form.node_id" style="font-size:12px;color:var(--accent);">
-            <el-icon><WarningFilled /></el-icon>
-            {{ t('createContainer.gpuPickNeedNode') }}
+          <div class="field">
+            <label class="field-label" for="f-env">
+              {{ t('createContainer.fieldEnv') }} <span class="opt">{{ t('createContainer.fieldEnvHint') }}</span>
+            </label>
+            <textarea class="textarea" id="f-env" v-model="form.envText" rows="3" :placeholder="t('createContainer.fieldEnvPlaceholder')" />
           </div>
-          <div v-else-if="loadingDevices" style="font-size:12px;color:var(--text-dim);">
-            {{ t('createContainer.gpuLoading') }}
+
+          <div class="field">
+            <label class="field-label" for="f-vol">
+              {{ t('createContainer.fieldVolumes') }} <span class="opt">{{ t('createContainer.fieldVolumesHint') }}</span>
+            </label>
+            <textarea class="textarea" id="f-vol" v-model="form.volumeBinds" rows="2" :placeholder="t('createContainer.fieldVolumesPlaceholder')" />
           </div>
-          <div v-else-if="!gpuDevices.length" style="font-size:12px;color:var(--text-dim);">
-            {{ t('createContainer.gpuNoneOnNode') }}
+
+          <div class="field">
+            <label class="field-label">{{ t('createContainer.fieldPorts') }}</label>
+            <div class="col" style="gap: var(--sp-2);">
+              <div v-for="(p, i) in form.ports" :key="i" class="field-row">
+                <div class="numstep" style="width: 140px;">
+                  <button type="button" @click="decPort(i)">−</button>
+                  <input v-model.number="p.container_port" type="number" min="1" max="65535" step="1" />
+                  <button type="button" @click="incPort(i)">＋</button>
+                </div>
+                <select class="select" v-model="p.protocol" style="max-width: 120px;">
+                  <option value="tcp">tcp</option>
+                  <option value="udp">udp</option>
+                </select>
+                <button class="btn is-danger is-small" type="button" @click="removePort(i)" :disabled="form.ports.length <= 1">{{ t('act.delete') }}</button>
+              </div>
+            </div>
+            <button class="btn is-ghost is-small" type="button" style="align-self: flex-start; margin-top: var(--sp-2);" @click="addPort">
+              <span class="ico" aria-hidden="true">＋</span> {{ t('createContainer.addPort') }}
+            </button>
+            <p class="field-hint">{{ t('createContainer.portHint') }}</p>
           </div>
-          <div v-else style="width:100%;display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;">
-            <div
-              v-for="d in gpuDevices"
-              :key="d.index"
-              :class="['gpu-card', {
-                selected: form.gpu_indices.includes(d.index),
-                disabled: !!d.held_by,
-              }]"
-              @click="toggleIndex(d.index, !!d.held_by)"
-            >
-              <div class="gpu-card-row">
-                <strong>GPU {{ d.index }}</strong>
-                <span v-if="d.held_by" class="pill held">
-                  {{ t('createContainer.gpuHeldBy', { name: d.held_by.container_name || d.held_by.container_id }) }}
+        </section>
+
+        <!-- ----- Resources ----- -->
+        <h3 class="form-divider">{{ t('createContainer.sectionResources') }}</h3>
+        <section class="form-section">
+          <div class="field-row">
+            <div class="field">
+              <label class="field-label" for="f-cpu">{{ t('createContainer.fieldCpu') }}</label>
+              <el-input-number v-model="form.cpuCores" :min="0" :step="0.5" :precision="1" style="width:160px;" />
+              <p class="field-hint"><code class="code">0</code> = {{ t('createContainer.fieldCpuHint').replace('0 = ', '') }}</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="f-mem">{{ t('createContainer.fieldMemory') }}</label>
+              <el-input-number v-model="form.memoryMb" :min="0" :step="64" style="width:160px;" />
+              <p class="field-hint">{{ t('createContainer.fieldMemoryHint') }}</p>
+            </div>
+            <div class="field">
+              <label class="field-label">{{ t('createContainer.fieldPull') }}</label>
+              <label class="row-tight" style="cursor:pointer;">
+                <span class="switch">
+                  <input v-model="form.pull" type="checkbox" />
+                  <span class="track" />
                 </span>
-                <span v-else class="pill free">{{ t('createContainer.gpuFreePill') }}</span>
-              </div>
-              <div v-if="d.name" style="font-size:12px;color:var(--text-dim);margin-top:4px;">{{ d.name }}</div>
-              <div v-if="d.mem_total_bytes" style="font-size:11px;color:var(--text-dim);">
-                {{ fmtBytes(d.mem_total_bytes) }}
+                <span class="field-hint" style="margin: 0;">{{ t('createContainer.fieldPullHint') }}</span>
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- ----- GPU ----- -->
+        <h3 class="form-divider">{{ t('createContainer.sectionGpu') }}</h3>
+        <section class="form-section">
+          <p class="gpu-summary">
+            <span class="ico" aria-hidden="true">▦</span>
+            <span><strong>{{ totalGpuFree }}</strong> / <strong>{{ totalGpu }}</strong> {{ t('createContainer.clusterGpuSummary', { free: totalGpuFree, total: totalGpu, nodes: gpuNodes.length }) }}</span>
+          </p>
+
+          <div class="field">
+            <label class="field-label">{{ t('createContainer.gpuMode') }}</label>
+            <div class="segmented" role="tablist">
+              <button type="button" :class="{ 'is-active': form.gpuMode === 'auto', 'is-accent': form.gpuMode === 'auto' }" role="tab" :aria-selected="form.gpuMode === 'auto'" @click="form.gpuMode = 'auto'">{{ t('createContainer.gpuModeAuto') }}</button>
+              <button type="button" :class="{ 'is-active': form.gpuMode === 'pick', 'is-accent': form.gpuMode === 'pick' }" role="tab" :aria-selected="form.gpuMode === 'pick'" @click="form.gpuMode = 'pick'">{{ t('createContainer.gpuModePick') }}</button>
+            </div>
+          </div>
+
+          <!-- AUTO -->
+          <div v-if="form.gpuMode === 'auto'" class="field">
+            <label class="field-label" for="f-gpu-count">{{ t('createContainer.fieldGpu') }}</label>
+            <el-input-number v-model="form.gpuCount" :min="0" :max="64" :step="1" style="width:140px;" />
+            <p :class="['field-hint', { 'is-warn': gpuAutoHint.warn }]" style="margin-top: var(--sp-2);">
+              <template v-if="gpuAutoHint.warn">
+                <strong>{{ qualifyCount }}</strong> of {{ onlineNodes.length }} — {{ t('createContainer.gpuNoCapable') }}
+              </template>
+              <template v-else>
+                {{ gpuAutoHint.text }}
+              </template>
+            </p>
+          </div>
+
+          <!-- PICK -->
+          <div v-else class="field">
+            <p class="field-hint">{{ t('createContainer.gpuPickHint') }}</p>
+            <div v-if="!form.nodeId" class="empty" style="grid-column: 1/-1; padding: var(--sp-6);">
+              <div class="ico" aria-hidden="true">▦</div>
+              <p class="empty-title">{{ t('createContainer.gpuPickNeedNode') }}</p>
+              <p class="empty-hint">{{ t('createContainer.gpuPickNeedNodeHint') }}</p>
+            </div>
+            <div v-else-if="loadingDevices" class="field-hint" style="margin-top: var(--sp-2);">…</div>
+            <div v-else-if="!gpuDevices.length" class="empty" style="grid-column: 1/-1; padding: var(--sp-6);">
+              <div class="ico" aria-hidden="true">▦</div>
+              <p class="empty-title">{{ t('createContainer.gpuNoDevices') }}</p>
+              <p class="empty-hint">{{ t('createContainer.gpuNoDevicesHint') }}</p>
+            </div>
+            <div v-else class="gpu-grid">
+              <div
+                v-for="d in gpuDevices"
+                :key="d.index"
+                :class="['gpu-card', { 'is-selected': form.gpuIndices.includes(d.index), 'is-held': !!d.held_by }]"
+                :aria-disabled="!!d.held_by"
+                :tabindex="d.held_by ? -1 : 0"
+                @click="toggleIndex(d.index, !!d.held_by)"
+                @keydown.enter.prevent="toggleIndex(d.index, !!d.held_by)"
+                @keydown.space.prevent="toggleIndex(d.index, !!d.held_by)"
+              >
+                <div class="gpu-card-head">
+                  <span class="gpu-card-name">GPU {{ d.index }}</span>
+                  <span v-if="d.held_by" class="badge is-danger">{{ t('createContainer.gpuInUse') }}</span>
+                  <span v-else-if="form.gpuIndices.includes(d.index)" class="badge is-accent">{{ t('createContainer.gpuSelected') }}</span>
+                  <span v-else class="badge is-success">{{ t('createContainer.gpuFreePill') }}</span>
+                </div>
+                <span v-if="d.name" class="gpu-card-device">{{ d.name }}</span>
+                <span v-if="d.mem_total_bytes" class="gpu-card-mem">{{ fmtBytes(d.mem_total_bytes) }}</span>
               </div>
             </div>
           </div>
-          <div v-if="gpuDevices.length" style="margin-top:8px;font-size:12px;color:var(--text-dim);">
-            {{ t('createContainer.gpuSelectedCount', { n: form.gpu_indices.length }) }}
+        </section>
+
+        <!-- ----- Scheduling ----- -->
+        <h3 class="form-divider">{{ t('createContainer.sectionScheduling') }}</h3>
+        <section class="form-section">
+          <div class="field">
+            <label class="field-label" for="f-node">
+              {{ t('createContainer.fieldTargetNode') }} <span class="opt">{{ t('createContainer.fieldTargetNodeOptional') }}</span>
+            </label>
+            <select class="select" id="f-node" v-model="form.nodeId" :disabled="form.gpuMode === 'pick' && !form.nodeId && gpuNodes.length === 0">
+              <option value="">{{ t('createContainer.schedAuto') }}</option>
+              <option v-for="n in pickerNodes" :key="n.id" :value="n.id">{{ nodeOptionLabel(n) }}</option>
+            </select>
+            <p :class="['field-hint', { 'is-warn': schedHint.warn }]" style="margin-top: var(--sp-2);">
+              {{ schedHint.text }}
+            </p>
           </div>
-        </el-form-item>
+        </section>
+      </form>
 
-        <el-divider>{{ t('createContainer.dividerScheduling') }}</el-divider>
-
-        <el-form-item :label="t('createContainer.fieldTargetNode')">
-          <el-select
-            v-model="form.node_id"
-            :placeholder="t('createContainer.autoSelect')"
-            :clearable="form.gpu_mode !== 'pick'"
-            style="width:100%;"
-          >
-            <el-option
-              v-for="n in pickerNodes"
-              :key="n.id"
-              :label="nodeLabel(n)"
-              :value="n.id"
-            />
-          </el-select>
-        </el-form-item>
-
-        <div v-if="needsGpu && !gpuCapableNodes.length" style="font-size:12px;color:var(--accent);">
-          <el-icon><WarningFilled /></el-icon>
-          {{ t('createContainer.gpuNoCapableNodes') }}
-        </div>
-        <div v-else-if="form.gpu_mode === 'auto' && form.gpu_count > 0 && !form.node_id" style="font-size:12px;color:var(--accent);">
-          <el-icon><WarningFilled /></el-icon>
-          {{ t('createContainer.gpuPinHint') }}
+      <!-- ============ Sticky side ============ -->
+      <aside class="create-side">
+        <div class="create-summary">
+          <h3>{{ t('createContainer.summaryTitle') }}</h3>
+          <ul class="summary-list">
+            <li><span>{{ t('createContainer.summaryImage') }}</span><span class="ellipsis">{{ sumImage }}</span></li>
+            <li><span>{{ t('createContainer.summaryName') }}</span><span class="ellipsis">{{ sumName }}</span></li>
+            <li><span>{{ t('createContainer.summaryPorts') }}</span><span>{{ sumPorts }}</span></li>
+            <li><span>{{ t('createContainer.summaryCpu') }}</span><span>{{ sumCpu }}</span></li>
+            <li><span>{{ t('createContainer.summaryMem') }}</span><span>{{ sumMem }}</span></li>
+            <li><span>{{ t('createContainer.summaryGpu') }}</span><span>{{ sumGpu }}</span></li>
+            <li><span>{{ t('createContainer.summaryNode') }}</span><span class="ellipsis">{{ sumNode }}</span></li>
+            <li><span>{{ t('createContainer.summaryPull') }}</span><span>{{ sumPull }}</span></li>
+          </ul>
         </div>
 
-        <el-divider />
-
-        <div style="display:flex;gap:12px;">
-          <el-button type="primary" icon="Promotion" :loading="submitting" :disabled="!canSubmit" @click="submit">
-            {{ t('createContainer.buttonCreate') }}
-          </el-button>
-          <el-button @click="reset" :disabled="submitting">{{ t('createContainer.buttonReset') }}</el-button>
-          <el-button text @click="router.push('/containers')">{{ t('createContainer.buttonViewAll') }}</el-button>
+        <div class="sticky-actions">
+          <button class="btn is-primary" type="button" :disabled="!canSubmit || submitting" :loading="submitting" style="width: 100%; justify-content: center;" @click="submit">
+            <span class="ico" aria-hidden="true">✦</span>
+            <span>{{ t('createContainer.buttonCreate') }}</span>
+          </button>
+          <button class="btn is-ghost" type="button" style="width: 100%; justify-content: center;" @click="reset">{{ t('createContainer.buttonReset') }}</button>
         </div>
-      </el-form>
-    </el-card>
+      </aside>
+    </div>
 
-    <el-card v-if="result" style="margin-top:16px;">
-      <template #header>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <el-icon color="var(--green)"><CircleCheckFilled /></el-icon>
-          <span>{{ t('createContainer.resultTitle') }}</span>
+    <!-- ============ Result card ============ -->
+    <div v-if="result" id="result-wrap" style="margin-top: var(--sp-7);">
+      <article class="result">
+        <div class="result-head">
+          <span class="ico" aria-hidden="true">✓</span>
+          <h2 class="result-title">{{ t('createContainer.success') }}</h2>
+          <span class="badge" :class="stateClass(result.container.state)" style="margin-left: auto;">{{ t('state.' + result.container.state, result.container.state) }}</span>
         </div>
-      </template>
-      <el-descriptions :column="2" border>
-        <el-descriptions-item :label="t('createContainer.resultContainerId')">{{ result.container.id }}</el-descriptions-item>
-        <el-descriptions-item :label="t('createContainer.resultNode')">{{ result.node.name }}</el-descriptions-item>
-        <el-descriptions-item :label="t('createContainer.resultImage')">{{ result.container.image }}</el-descriptions-item>
-        <el-descriptions-item :label="t('createContainer.resultState')">
-          <span :class="['status-dot', result.container.state]"></span>{{ stateLabel(result.container.state) }}
-        </el-descriptions-item>
-        <el-descriptions-item v-if="result.gpu_indices && result.gpu_indices.length" :label="t('createContainer.resultGpuIndices')" :span="2">
-          {{ result.gpu_indices.join(', ') }}
-        </el-descriptions-item>
-        <el-descriptions-item v-if="result.external_url" :label="t('createContainer.resultPublicUrl')" :span="2">
-          <a :href="result.external_url" target="_blank">{{ result.external_url }}</a>
-        </el-descriptions-item>
-      </el-descriptions>
-      <div style="margin-top:12px;font-size:12px;color:var(--text-dim);">
-        {{ t('createContainer.resultHint') }}
-      </div>
-    </el-card>
+        <p class="result-hint">{{ t('createContainer.resultHint') }}</p>
+        <dl class="descriptions">
+          <dt>{{ t('createContainer.resultContainerId') }}</dt><dd class="mono">{{ result.container.id }}</dd>
+          <dt>{{ t('createContainer.resultNode') }}</dt><dd class="mono">{{ result.node.name }}</dd>
+          <dt>{{ t('createContainer.resultImage') }}</dt><dd class="mono col-ellipsis">{{ result.container.image }}</dd>
+          <dt>{{ t('createContainer.resultState') }}</dt>
+          <dd>
+            <span class="status-dot" :class="result.container.state" />
+            <span class="badge" :class="stateClass(result.container.state)" style="margin-left:6px;">{{ t('state.' + result.container.state, result.container.state) }}</span>
+          </dd>
+          <template v-if="result.gpu_indices && result.gpu_indices.length">
+            <dt>{{ t('createContainer.resultGpuIndices') }}</dt>
+            <dd class="mono">{{ result.gpu_indices.length }} · GPU {{ result.gpu_indices.join(', ') }}</dd>
+          </template>
+          <template v-if="result.external_url">
+            <dt>{{ t('createContainer.resultPublicUrl') }}</dt>
+            <dd><a :href="result.external_url" target="_blank" rel="noopener">{{ result.external_url }}</a></dd>
+          </template>
+        </dl>
+      </article>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.gpu-card {
-  border: 1px solid var(--border, #444);
-  border-radius: 6px;
-  padding: 10px 12px;
-  cursor: pointer;
-  transition: border-color 0.15s, background-color 0.15s;
-  user-select: none;
-}
-.gpu-card:hover:not(.disabled) {
-  border-color: var(--accent, #66b1ff);
-}
-.gpu-card.selected {
-  border-color: var(--accent, #66b1ff);
-  background-color: rgba(102, 177, 255, 0.08);
-}
-.gpu-card.disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-.gpu-card-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.pill {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-.pill.free {
-  background: rgba(80, 200, 120, 0.18);
-  color: #5bc983;
-}
-.pill.held {
-  background: rgba(244, 67, 54, 0.18);
-  color: #f4a4a0;
+.gpu-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
 }
 </style>

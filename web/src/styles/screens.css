@@ -1,0 +1,351 @@
+/* ============================================================
+   pumpkinPie — per-screen layout classes
+   ============================================================ */
+
+/* ---------- Dashboard ---------- */
+.stat-pair {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: var(--sp-4);
+}
+@media (max-width: 900px) { .stat-pair { grid-template-columns: 1fr; } }
+
+.gauge-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-4);
+}
+@media (max-width: 800px) { .gauge-row { grid-template-columns: 1fr; } }
+
+.gauge-row .gauge-tile { display: flex; flex-direction: column; align-items: center; }
+
+/* ---------- Dashboard KPI strip ----------
+   Compact horizontal row of small mono labels + large display
+   numbers. Reused on both the NODES and CONTAINERS sections of
+   the dashboard, plus the AVERAGE roll-up. Spacing comes from
+   the per-span margins so the strip stays single-line on wide
+   screens and wraps cleanly on narrow ones.
+*/
+.dash-kpis {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 4px var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+}
+.dash-kpis .kpi {
+  display: inline-flex; align-items: baseline; gap: 4px;
+  font: 500 var(--fs-md)/1.2 var(--font-mono);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.dash-kpis .kpi strong {
+  color: var(--text);
+  font: 700 var(--fs-2xl)/1 var(--font-display);
+  letter-spacing: -0.015em;
+  font-variant-numeric: tabular-nums;
+}
+.dash-kpis .kpi.is-online   strong { color: var(--success); }
+.dash-kpis .kpi.is-running  strong { color: var(--success); }
+.dash-kpis .kpi.is-creating strong { color: var(--accent); }
+.dash-kpis .kpi.is-stopping strong { color: var(--warn); }
+.dash-kpis .kpi.is-error    strong { color: var(--danger); }
+.dash-kpis .kpi.is-offline  strong { color: var(--text-dim); }
+/* Metric color variants — the AVERAGE/load strip uses these so
+   the CPU/MEM/GPU numbers pick up the brand orange / blue /
+   purple used by the per-node bars below. */
+.dash-kpis .kpi.is-cpu strong { color: var(--metric-cpu); }
+.dash-kpis .kpi.is-mem strong { color: var(--metric-mem); }
+.dash-kpis .kpi.is-gpu strong { color: var(--metric-gpu); }
+.dash-kpis .sep {
+  width: 1px; height: 22px;
+  background: var(--border);
+  display: inline-block;
+  flex: none;
+}
+/* The KPI strip is reused for both NODES and CONTAINERS sections;
+   a small leading label inside the strip makes its domain
+   self-evident so the section labels can be skipped to keep the
+   dashboard dense. */
+.dash-kpis .kpi-domain {
+  display: inline-flex; align-items: center;
+  padding-right: var(--sp-2); margin-right: var(--sp-1);
+  font: 700 10px/1 var(--font-mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text);
+  border-right: 1px solid var(--border);
+  align-self: stretch;
+}
+/* .is-metrics — the AVERAGE/load strip. Slightly more vertical
+   padding so the 24px display numbers breathe, and the leading
+   chip picks up a soft accent tint so it reads as the headline
+   strip rather than another capacity row. */
+.dash-kpis.is-metrics {
+  padding: var(--sp-3) var(--sp-4);
+  gap: 4px var(--sp-4);
+}
+.dash-kpis.is-metrics .kpi-domain {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-right-color: var(--border);
+  padding-left: var(--sp-3);
+  padding-right: var(--sp-3);
+  margin-right: var(--sp-2);
+}
+.dash-kpis.is-metrics .kpi { gap: 6px; }
+.dash-kpis.is-metrics .kpi strong {
+  font-size: var(--fs-2xl);
+  letter-spacing: -0.02em;
+}
+.dash-kpis.is-metrics .sep { height: 26px; }
+
+.screen-section + .screen-section { margin-top: var(--sp-4); }
+
+/* ---------- Nodes ---------- */
+.node-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+  padding: var(--sp-5);
+  transition: border-color var(--t-fast);
+}
+.node-card.is-offline { opacity: 0.7; }
+.node-card:hover { border-color: var(--border-strong); }
+
+.gpu-row {
+  display: grid;
+  grid-template-columns: 1fr 200px auto;
+  gap: var(--sp-3);
+  align-items: center;
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.gpu-row:last-child { border-bottom: 0; }
+.gpu-row .gpu-name { font: 500 var(--fs-md)/1.3 var(--font-body); color: var(--text); }
+.gpu-row .gpu-mem  { font: 500 var(--fs-sm)/1.3 var(--font-mono); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.gpu-row .gpu-held { font: 500 var(--fs-sm)/1.3 var(--font-body); text-align: right; }
+.gpu-row .gpu-held .free { color: var(--text-dim); }
+.gpu-row .gpu-held .held { color: var(--accent); }
+
+/* ---------- Containers ---------- */
+.filters {
+  display: flex; gap: var(--sp-3);
+  margin-bottom: var(--sp-4);
+  flex-wrap: wrap;
+}
+.search {
+  flex: 1 1 240px;
+  position: relative;
+}
+.search input {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 12px 8px 34px;
+  border-radius: var(--r-3);
+  font: 500 var(--fs-sm)/1.3 var(--font-body);
+}
+.search input:focus { border-color: var(--accent); outline: none; }
+.search::before {
+  content: "";
+  position: absolute; left: 12px; top: 50%;
+  width: 14px; height: 14px;
+  transform: translateY(-50%);
+  background: currentColor;
+  color: var(--text-faint);
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'><circle cx='11' cy='11' r='7'/><path d='m20 20-3.5-3.5'/></svg>") no-repeat center / contain;
+          mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2'><circle cx='11' cy='11' r='7'/><path d='m20 20-3.5-3.5'/></svg>") no-repeat center / contain;
+}
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  color: var(--text-dim);
+  font: 500 var(--fs-sm)/1 var(--font-body);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.chip:hover { border-color: var(--border-strong); color: var(--text); }
+.chip.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+/* ---------- Create form ---------- */
+.create-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--sp-6);
+  align-items: start;
+}
+@media (max-width: 1100px) { .create-layout { grid-template-columns: 1fr; } }
+
+.create-form {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+  padding: var(--sp-6);
+}
+
+.create-side {
+  position: sticky;
+  top: var(--sp-5);
+  display: flex; flex-direction: column; gap: var(--sp-4);
+}
+
+.create-summary {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+  padding: var(--sp-5);
+}
+.create-summary h3 {
+  margin: 0 0 var(--sp-3);
+  font: 600 var(--fs-md)/1 var(--font-display);
+  color: var(--text);
+}
+.summary-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.summary-list li {
+  display: flex; align-items: center; justify-content: space-between;
+  font: 500 var(--fs-sm)/1.4 var(--font-body);
+  color: var(--text-dim);
+}
+.summary-list li span:last-child {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  max-width: 60%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.sticky-actions {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+  padding: var(--sp-4);
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  box-shadow: var(--shadow-md);
+}
+.sticky-actions .row { gap: var(--sp-2); }
+
+/* GPU picker hint */
+.gpu-summary {
+  font: 500 var(--fs-sm)/1.4 var(--font-body);
+  color: var(--text-dim);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--bg-soft);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-3);
+  margin-bottom: var(--sp-3);
+  display: flex; align-items: center; gap: var(--sp-2);
+}
+.gpu-summary strong { color: var(--text); font: 600 var(--fs-md)/1 var(--font-mono); font-variant-numeric: tabular-nums; }
+.gpu-summary .ico { color: var(--metric-gpu); }
+
+/* ---------- Launcher (index) ---------- */
+.launcher {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: var(--sp-9) var(--sp-7);
+}
+.launcher-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-5);
+  margin-bottom: var(--sp-8);
+  padding-bottom: var(--sp-6);
+  border-bottom: 1px solid var(--border-soft);
+}
+.launcher-title {
+  font: 700 var(--fs-3xl)/1.1 var(--font-display);
+  letter-spacing: -0.025em;
+  margin: 0 0 var(--sp-2);
+  color: var(--text);
+}
+.launcher-sub {
+  font: 500 var(--fs-lg)/1.5 var(--font-body);
+  color: var(--text-dim);
+  max-width: 640px;
+}
+.launcher-meta {
+  display: flex; flex-direction: column; gap: var(--sp-1);
+  text-align: right;
+  font: 500 var(--fs-sm)/1.4 var(--font-mono);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.launcher-meta strong { color: var(--text); }
+
+.launcher-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: var(--sp-5);
+}
+.launcher-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+  padding: var(--sp-5);
+  display: flex; flex-direction: column; gap: var(--sp-4);
+  text-decoration: none;
+  color: inherit;
+  transition: border-color var(--t-fast), transform var(--t-fast);
+  position: relative;
+  overflow: hidden;
+}
+.launcher-card:hover {
+  border-color: var(--accent);
+  text-decoration: none;
+  transform: translateY(-2px);
+}
+.launcher-card::after {
+  content: "→";
+  position: absolute; top: var(--sp-5); right: var(--sp-5);
+  color: var(--text-faint);
+  font-size: 18px;
+  transition: color var(--t-fast), transform var(--t-fast);
+}
+.launcher-card:hover::after { color: var(--accent); transform: translateX(2px); }
+.launcher-card-num {
+  font: 700 48px/1 var(--font-display);
+  letter-spacing: -0.04em;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.launcher-card-title {
+  font: 600 var(--fs-xl)/1.2 var(--font-display);
+  letter-spacing: -0.015em;
+  color: var(--text);
+  margin: 0;
+}
+.launcher-card-desc {
+  font: 500 var(--fs-sm)/1.5 var(--font-body);
+  color: var(--text-dim);
+}
+.launcher-card-tags {
+  display: flex; gap: 6px; flex-wrap: wrap;
+  margin-top: auto;
+}
+
+/* ---------- Misc ---------- */
+.kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--r-2);
+  font: 500 11px/1 var(--font-mono);
+  color: var(--text-dim);
+}
+
+.section-spacer { height: var(--sp-7); }

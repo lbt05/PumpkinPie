@@ -1,30 +1,38 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import VChart from 'vue-echarts'
-import { use } from 'echarts/core'
-import { CanvasRenderer } from 'echarts/renderers'
-import { LineChart, GaugeChart, BarChart } from 'echarts/charts'
+import { useRouter } from 'vue-router'
 import {
-  GridComponent,
-  TooltipComponent,
-  TitleComponent,
-  LegendComponent,
-} from 'echarts/components'
-import { listContainers, listNodes, fmtBytes, fmtTime, type Container, type Node } from '@/api/client'
-
-use([CanvasRenderer, LineChart, GaugeChart, BarChart, GridComponent, TooltipComponent, TitleComponent, LegendComponent])
+  listContainers,
+  listNodes,
+  fmtBytes,
+  fmtDateTime,
+  fmtTime,
+  stateClass,
+  type Container,
+  type Node,
+} from '@/api/client'
 
 const { t } = useI18n()
+const router = useRouter()
+
 const nodes = ref<Node[]>([])
 const containers = ref<Container[]>([])
+const lastPoll = ref<string>('—')
+const lastError = ref<string>('')
+const lastErrorAt = ref<number>(0)
 let timer: number | undefined
 
 async function refresh() {
   try {
-    ;[nodes.value, containers.value] = await Promise.all([listNodes(), listContainers()])
-  } catch (e) {
-    console.warn(e)
+    const [n, c] = await Promise.all([listNodes(), listContainers()])
+    nodes.value = n
+    containers.value = c
+    lastPoll.value = fmtTime(new Date().toISOString())
+    lastError.value = ''
+  } catch (e: any) {
+    lastError.value = e?.response?.data?.error || e?.message || 'network error'
+    lastErrorAt.value = Date.now()
   }
 }
 
@@ -32,223 +40,210 @@ onMounted(() => {
   refresh()
   timer = window.setInterval(refresh, 5000)
 })
-onUnmounted(() => timer && clearInterval(timer))
+onUnmounted(() => { if (timer) clearInterval(timer) })
 
-const stats = computed(() => {
-  const totalCores = nodes.value.reduce((s, n) => s + n.cpu_cores, 0)
-  const totalMem = nodes.value.reduce((s, n) => s + n.mem_total_bytes, 0)
-  const usedMem = nodes.value.reduce((s, n) => s + n.mem_used_bytes, 0)
-  const totalGpu = nodes.value.reduce((s, n) => s + n.gpu_count, 0)
-  return {
-    nodes: nodes.value.length,
-    online: nodes.value.filter((n) => n.state === 'online').length,
-    containers: containers.value.length,
-    running: containers.value.filter((c) => c.state === 'running' || c.state === 'created').length,
-    totalCores,
-    totalMem,
-    usedMem,
-    totalGpu,
-  }
+const online = computed(() => nodes.value.filter((n) => n.state === 'online'))
+const offline = computed(() => nodes.value.filter((n) => n.state !== 'online'))
+
+const totalCores = computed(() => online.value.reduce((s, n) => s + (n.cpu_cores || 0), 0))
+const totalMem = computed(() => online.value.reduce((s, n) => s + (n.mem_total_bytes || 0), 0))
+const usedMem = computed(() => online.value.reduce((s, n) => s + (n.mem_used_bytes || 0), 0))
+const totalGpu = computed(() => online.value.reduce((s, n) => s + (n.gpu_count || 0), 0))
+
+const running = computed(() => containers.value.filter((c) => c.state === 'running').length)
+const starting = computed(() => containers.value.filter((c) => c.state === 'starting').length)
+const stopping = computed(() => containers.value.filter((c) => c.state === 'stopping').length)
+const errored = computed(() => containers.value.filter((c) => c.state === 'error').length)
+
+const avgCpu = computed(() => {
+  if (!online.value.length) return 0
+  return Math.round(online.value.reduce((s, n) => s + (n.cpu_percent || 0), 0) / online.value.length)
+})
+const memPct = computed(() => totalMem.value ? Math.round((usedMem.value / totalMem.value) * 100) : 0)
+const avgGpu = computed(() => {
+  const gpus = online.value.filter((n) => (n.gpu_count || 0) > 0)
+  if (!gpus.length) return 0
+  return Math.round(gpus.reduce((s, n) => s + (n.gpu_usage_percent || 0), 0) / gpus.length)
+})
+const hasGpu = computed(() => totalGpu.value > 0)
+
+const errorAgo = computed(() => {
+  if (!lastErrorAt.value) return '0 s'
+  return fmtAge(new Date(lastErrorAt.value).toISOString())
 })
 
-function avgUsage(): number {
-  if (!nodes.value.length) return 0
-  return nodes.value.reduce((s, n) => s + n.cpu_percent, 0) / nodes.value.length
-}
+const recent = computed(() =>
+  containers.value.slice().sort((a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime()).slice(0, 8)
+)
 
-function memPercent(): number {
-  if (stats.value.totalMem === 0) return 0
-  return (stats.value.usedMem / stats.value.totalMem) * 100
-}
-
-function gpuPercent(): number {
-  const totals = nodes.value.reduce((s, n) => s + n.gpu_count, 0)
-  if (totals === 0) return 0
-  const used = nodes.value.reduce(
-    (s, n) => s + (n.gpu_count > 0 ? n.gpu_usage_percent * n.gpu_count : 0),
-    0,
-  )
-  return used / totals
-}
-
-const cpuGauge = computed(() => ({
-  series: [
-    {
-      type: 'gauge',
-      progress: { show: true, width: 12 },
-      axisLine: { lineStyle: { width: 12 } },
-      pointer: { show: false },
-      axisTick: { show: false },
-      splitLine: { show: false },
-      axisLabel: { show: false },
-      detail: { valueAnimation: true, fontSize: 24, color: 'var(--text)', formatter: '{value}%' },
-      data: [{ value: Number(avgUsage().toFixed(1)) }],
-    },
-  ],
-}))
-
-const memGauge = computed(() => ({
-  series: [
-    {
-      type: 'gauge',
-      progress: { show: true, width: 12 },
-      axisLine: { lineStyle: { width: 12 } },
-      pointer: { show: false },
-      axisTick: { show: false },
-      splitLine: { show: false },
-      axisLabel: { show: false },
-      detail: { valueAnimation: true, fontSize: 24, color: 'var(--text)', formatter: '{value}%' },
-      data: [{ value: Number(memPercent().toFixed(1)) }],
-    },
-  ],
-}))
-
-const gpuGauge = computed(() => ({
-  series: [
-    {
-      type: 'gauge',
-      progress: { show: true, width: 12 },
-      axisLine: { lineStyle: { width: 12 } },
-      pointer: { show: false },
-      axisTick: { show: false },
-      splitLine: { show: false },
-      axisLabel: { show: false },
-      detail: { valueAnimation: true, fontSize: 24, color: 'var(--text)', formatter: '{value}%' },
-      data: [{ value: Number(gpuPercent().toFixed(1)) }],
-    },
-  ],
-}))
-
-const perNodeBar = computed(() => {
-  const online = nodes.value.filter((n) => n.state === 'online')
-  return {
-    tooltip: { trigger: 'axis' },
-    grid: { left: 30, right: 20, top: 30, bottom: 50 },
-    xAxis: {
-      type: 'category',
-      data: online.map((n) => n.name),
-      axisLabel: { color: 'var(--text-dim)', rotate: 30 },
-    },
-    yAxis: {
-      type: 'value',
-      max: 100,
-      axisLabel: { color: 'var(--text-dim)', formatter: '{value}%' },
-      splitLine: { lineStyle: { color: 'var(--border)' } },
-    },
-    series: [
-      {
-        name: 'CPU',
-        type: 'bar',
-        data: online.map((n) => Number(n.cpu_percent.toFixed(1))),
-        itemStyle: { color: '#ff8a3d' },
-      },
-      {
-        name: 'GPU',
-        type: 'bar',
-        data: online.map((n) => Number(n.gpu_usage_percent.toFixed(1))),
-        itemStyle: { color: '#ab47bc' },
-      },
-      {
-        name: 'MEM',
-        type: 'bar',
-        data: online.map((n) =>
-          n.mem_total_bytes > 0
-            ? Number(((n.mem_used_bytes / n.mem_total_bytes) * 100).toFixed(1))
-            : 0,
-        ),
-        itemStyle: { color: '#42a5f5' },
-      },
-    ],
-    legend: { textStyle: { color: 'var(--text-dim)' } },
-  }
-})
-
-function stateLabel(s: string) {
-  return t(`state.${s}` as any, s)
+function fmtAge(iso: string): string {
+  const d = new Date(iso).getTime()
+  const ms = Date.now() - d
+  if (ms < 60_000) return Math.max(0, Math.floor(ms / 1000)) + ' s'
+  return Math.floor(ms / 60_000) + ' m'
 }
 </script>
 
 <template>
   <div class="page">
-    <div class="page-header">
+    <header class="page-header">
       <div>
-        <h1 class="page-title">{{ t('dashboard.title') }}</h1>
-        <div class="page-subtitle">{{ t('dashboard.subtitle') }}</div>
+        <h1 class="page-title">{{ t('page.dashboard.title') }}</h1>
+        <p class="page-subtitle">
+          <span>{{ t('page.dashboard.subtitle') }}</span>
+          <span class="dot" />
+          <span>{{ t('common.lastPoll') }}</span>
+          <span class="mono" style="color: var(--text);">{{ lastPoll }}</span>
+        </p>
       </div>
+      <div class="page-actions">
+        <button class="btn is-primary" type="button" @click="router.push('/containers/new')">
+          <span class="ico" aria-hidden="true">＋</span>
+          <span>{{ t('page.dashboard.cta') }}</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Poll-error banner -->
+    <div v-if="lastError" class="banner" role="alert">
+      <span class="ico" aria-hidden="true">⚠</span>
+      <span>
+        <strong>{{ t('dashboard.reconnecting') }}</strong>
+        {{ t('dashboard.reconnectingDesc', { ago: errorAgo, code: lastError }) }}
+      </span>
     </div>
 
-    <div class="cards">
-      <el-card>
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <div>
-            <div style="color:var(--text-dim);font-size:12px;">{{ t('dashboard.cardNodes') }}</div>
-            <div style="font-size:28px;font-weight:700;">{{ stats.online }} / {{ stats.nodes }}</div>
-            <div style="font-size:12px;color:var(--text-dim);">
-              {{ t('dashboard.cardNodesDetail', { cores: stats.totalCores, mem: fmtBytes(stats.totalMem), gpu: stats.totalGpu }) }}
+    <!-- ====== NODES section ====== -->
+    <section class="section">
+      <div class="dash-kpis" style="margin-bottom: var(--sp-2);">
+        <span class="kpi-domain">{{ t('dashboard.kpiNodes') }}</span>
+        <span class="kpi is-online">online <strong>{{ online.length }}</strong></span>
+        <span class="sep" />
+        <span class="kpi is-offline">offline <strong>{{ offline.length }}</strong></span>
+        <span class="sep" />
+        <span class="kpi">{{ t('common.cores') }} <strong>{{ totalCores }}</strong></span>
+        <span class="sep" />
+        <span class="kpi">mem <strong>{{ fmtBytes(usedMem) }} / {{ fmtBytes(totalMem) }}</strong></span>
+        <span class="sep" />
+        <span class="kpi">GPUs <strong>{{ totalGpu }}</strong></span>
+      </div>
+
+      <div v-if="online.length" class="dash-kpis is-metrics" style="margin-bottom: var(--sp-2);">
+        <span class="kpi-domain">{{ t('dashboard.avgLabel') }}</span>
+        <span class="kpi is-cpu">CPU <strong>{{ avgCpu }}%</strong></span>
+        <span class="sep" />
+        <span class="kpi is-mem">MEM <strong>{{ memPct }}%</strong></span>
+        <span v-if="hasGpu" class="kpi is-gpu" style="margin-left: var(--sp-3);">GPU <strong>{{ avgGpu }}%</strong></span>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3 class="card-title">{{ t('dashboard.pernodeTitle') }}</h3>
+          <RouterLink class="card-sub" to="/nodes" style="text-decoration: none;">
+            <span>{{ t('dashboard.pernodeCta') }}</span>
+          </RouterLink>
+        </div>
+        <div v-if="online.length" class="chart">
+          <div v-for="n in online" :key="n.id" class="chart-row">
+            <div class="name">
+              <span class="status-dot online" aria-hidden="true" />
+              {{ n.name }}
+            </div>
+            <div class="bars">
+              <div class="bar-mini cpu">
+                <span class="lbl">CPU</span>
+                <div class="bar"><div class="fill" :style="{ width: (n.cpu_percent || 0) + '%' }" /></div>
+                <span class="lbl" style="text-align:right;">{{ Math.round(n.cpu_percent || 0) }}%</span>
+              </div>
+              <div class="bar-mini mem">
+                <span class="lbl">MEM</span>
+                <div class="bar"><div class="fill" :style="{ width: (n.mem_total_bytes ? Math.round((n.mem_used_bytes / n.mem_total_bytes) * 100) : 0) + '%' }" /></div>
+                <span class="lbl" style="text-align:right;">{{ n.mem_total_bytes ? Math.round((n.mem_used_bytes / n.mem_total_bytes) * 100) : 0 }}%</span>
+              </div>
+              <div v-if="(n.gpu_count || 0) > 0" class="bar-mini gpu">
+                <span class="lbl">GPU</span>
+                <div class="bar"><div class="fill" :style="{ width: (n.gpu_usage_percent || 0) + '%' }" /></div>
+                <span class="lbl" style="text-align:right;">{{ Math.round(n.gpu_usage_percent || 0) }}%</span>
+              </div>
             </div>
           </div>
-          <el-icon :size="32" color="var(--accent)"><Cpu /></el-icon>
         </div>
-      </el-card>
-      <el-card>
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <div>
-            <div style="color:var(--text-dim);font-size:12px;">{{ t('dashboard.cardContainers') }}</div>
-            <div style="font-size:28px;font-weight:700;">{{ stats.running }} / {{ stats.containers }}</div>
-            <div style="font-size:12px;color:var(--text-dim);">{{ t('dashboard.cardContainersDetail') }}</div>
-          </div>
-          <el-icon :size="32" color="var(--blue)"><Box /></el-icon>
+        <div v-else class="empty">
+          <div class="ico" aria-hidden="true">▣</div>
+          <p class="empty-title">{{ t('dashboard.emptyNodes') }}</p>
+          <p class="empty-hint">
+            {{ t('dashboard.emptyNodesHint') }}
+            <code class="code">pp agent --master=master:7000</code>
+          </p>
         </div>
-      </el-card>
-    </div>
+      </div>
+    </section>
 
-    <div class="cards" style="grid-template-columns:repeat(auto-fill,minmax(320px,1fr));margin-top:16px;">
-      <el-card>
-        <template #header>{{ t('dashboard.gaugeClusterCpu') }}</template>
-        <v-chart :option="cpuGauge" style="height:180px;" autoresize />
-      </el-card>
-      <el-card>
-        <template #header>{{ t('dashboard.gaugeClusterMemory') }}</template>
-        <v-chart :option="memGauge" style="height:180px;" autoresize />
-        <div style="font-size:12px;color:var(--text-dim);text-align:center;">
-          {{ t('dashboard.memText', { used: fmtBytes(stats.usedMem), total: fmtBytes(stats.totalMem) }) }}
-        </div>
-      </el-card>
-      <el-card>
-        <template #header>{{ t('dashboard.gaugeClusterGpu') }}</template>
-        <v-chart :option="gpuGauge" style="height:180px;" autoresize />
-        <div style="font-size:12px;color:var(--text-dim);text-align:center;">
-          {{ t('dashboard.gpusAcrossCluster', { n: stats.totalGpu }) }}
-        </div>
-      </el-card>
-    </div>
+    <!-- ====== CONTAINERS section ====== -->
+    <section class="section">
+      <div class="dash-kpis" style="margin-bottom: var(--sp-2);">
+        <span class="kpi-domain">{{ t('dashboard.kpiContainers') }}</span>
+        <span class="kpi is-running">running <strong>{{ running }}</strong></span>
+        <span class="sep" />
+        <span class="kpi is-creating">starting <strong>{{ starting }}</strong></span>
+        <span class="sep" />
+        <span class="kpi is-stopping">stopping <strong>{{ stopping }}</strong></span>
+        <span class="sep" />
+        <span class="kpi is-error">errors <strong>{{ errored }}</strong></span>
+        <span class="sep" />
+        <span class="kpi">total <strong>{{ containers.length }}</strong></span>
+      </div>
 
-    <el-card style="margin-top:16px;">
-      <template #header>{{ t('dashboard.perNodeUtilization') }}</template>
-      <v-chart :option="perNodeBar" style="height:280px;" autoresize />
-    </el-card>
-
-    <el-card style="margin-top:16px;">
-      <template #header>{{ t('dashboard.recentContainers') }}</template>
-      <el-table :data="containers.slice(0, 8)" stripe>
-        <el-table-column :label="t('dashboard.colName')" prop="name" />
-        <el-table-column :label="t('dashboard.colImage')" prop="image" />
-        <el-table-column :label="t('dashboard.colNode')" prop="node_name" />
-        <el-table-column :label="t('dashboard.colState')">
-          <template #default="{ row }">
-            <span :class="['status-dot', row.state]"></span>{{ stateLabel(row.state) }}
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('dashboard.colExternal')">
-          <template #default="{ row }">
-            <a v-if="row.external_url" :href="row.external_url" target="_blank">:{{ row.external_port }}</a>
-            <span v-else>{{ t('common.na') }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column :label="t('dashboard.colCreated')">
-          <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
-        </el-table-column>
-      </el-table>
-    </el-card>
+      <div class="card">
+        <div class="card-head">
+          <h3 class="card-title">{{ t('dashboard.recentTitle') }}</h3>
+          <RouterLink class="card-sub" to="/containers" style="text-decoration: none;">
+            <span>{{ t('dashboard.recentCta') }}</span>
+          </RouterLink>
+        </div>
+        <div v-if="recent.length" class="table-wrap">
+          <table class="table is-fixed">
+            <colgroup>
+              <col style="width: 22%;">
+              <col style="width: 26%;">
+              <col style="width: 12%;">
+              <col style="width: 16%;">
+              <col style="width: 14%;">
+              <col style="width: 10%;">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>{{ t('col.name') }}</th>
+                <th>{{ t('col.image') }}</th>
+                <th>{{ t('col.node') }}</th>
+                <th>{{ t('col.state') }}</th>
+                <th>{{ t('col.external') }}</th>
+                <th>{{ t('col.created') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="c in recent" :key="c.id">
+                <td><span class="col-name col-ellipsis" :title="c.name">{{ c.name }}</span></td>
+                <td class="col-muted mono col-ellipsis" :title="c.image">{{ c.image }}</td>
+                <td class="col-muted mono col-ellipsis">{{ c.node_name || c.node_id }}</td>
+                <td>
+                  <span class="status-dot" :class="c.state" />
+                  <span class="badge" :class="stateClass(c.state)" style="margin-left:6px;">{{ t('state.' + c.state, c.state) }}</span>
+                </td>
+                <td class="col-muted col-ellipsis">
+                  <a v-if="c.external_url" :href="c.external_url" target="_blank" rel="noopener" class="col-ellipsis">{{ c.external_url.replace(/^https?:\/\//, '') }}</a>
+                  <span v-else class="faint">{{ t('common.na') }}</span>
+                </td>
+                <td class="col-muted mono col-ellipsis">{{ fmtDateTime(c.created_at) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="empty">
+          <div class="ico" aria-hidden="true">▢</div>
+          <p class="empty-title">{{ t('containers.empty') }}</p>
+        </div>
+      </div>
+    </section>
   </div>
 </template>

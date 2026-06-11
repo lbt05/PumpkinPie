@@ -420,8 +420,8 @@ func (s *Server) createContainer(c *gin.Context) {
 		NodeID:         target.ID,
 		Name:           containerName,
 		Image:          req.Image,
-		State:          "creating",
-		Status:         "creating",
+		State:          "starting",
+		Status:         "starting",
 		EnvJSON:        string(envJSON),
 		CmdJSON:        string(cmdJSON),
 		PortsJSON:      string(portsJSON),
@@ -643,13 +643,20 @@ func (s *Server) startContainer(c *gin.Context) {
 		}
 	}
 
+	// Flip to "starting" before dispatch so the UI has an honest
+	// transient state during the round-trip. Roll back to the prior
+	// state if the send fails so we never lie about being mid-flight.
+	priorState, priorStatus := cc.State, cc.Status
+	_ = s.store.UpdateContainerState(c.Request.Context(), cc.ID, cc.DockerID, "starting", "starting")
+
 	if err := sess.Send(&pb.MasterMessage{
 		Payload: &pb.MasterMessage_StartContainer{StartContainer: &pb.StartContainerCommand{
 			ContainerId: cc.ID,
 			DockerId:    cc.DockerID,
 		}},
 	}); err != nil {
-		// Roll back the reservation we just took.
+		// Roll back state + release the GPU reservation we just took.
+		_ = s.store.UpdateContainerState(c.Request.Context(), cc.ID, cc.DockerID, priorState, priorStatus)
 		if len(savedGPUs) > 0 {
 			_ = s.store.FreeGPUs(c.Request.Context(), cc.ID)
 		}
@@ -674,6 +681,7 @@ func (s *Server) startContainer(c *gin.Context) {
 			log.Printf("rebind proxy port %d after start failed: %v", port, err)
 		}
 	}
+
 	c.JSON(200, gin.H{"ok": true})
 }
 
@@ -690,7 +698,15 @@ func (s *Server) stopContainer(c *gin.Context) {
 		c.JSON(404, gin.H{"error": err.Error()})
 		return
 	}
+
+	// Flip to "stopping" before dispatch so the UI shows the in-flight
+	// transition during the agent's docker stop (up to 10s grace). Roll
+	// back to the prior state if the send fails so we never lie.
+	priorState, priorStatus := cc.State, cc.Status
+	_ = s.store.UpdateContainerState(c.Request.Context(), cc.ID, cc.DockerID, "stopping", "stopping")
+
 	if err := s.sendStopCommand(c, cc, false); err != nil {
+		_ = s.store.UpdateContainerState(c.Request.Context(), cc.ID, cc.DockerID, priorState, priorStatus)
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}

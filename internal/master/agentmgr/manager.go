@@ -164,6 +164,35 @@ func (m *Manager) handleDisconnect(nodeID string, err error) {
 	defer cancel()
 	_ = m.store.UpdateNodeState(ctx, nodeID, "offline")
 	m.publish(NodeUpdate{NodeID: nodeID, Kind: "state", At: time.Now()})
+
+	// Defensive: any container left in a transient state on this node
+	// (the master set starting/stopping but the agent died before acking)
+	// would otherwise stay stuck forever. Mark them as error so the
+	// user can see the situation and free their GPU reservations.
+	m.revertTransientOnDisconnect(ctx, nodeID, err.Error())
+}
+
+// revertTransientOnDisconnect flips any starting/stopping container on
+// the given node back to error and releases its GPU reservations. It
+// is best-effort: a failure here would only leave the row stuck in its
+// transient state until the next lifecycle event.
+func (m *Manager) revertTransientOnDisconnect(ctx context.Context, nodeID, reason string) {
+	all, err := m.store.ListContainers(ctx)
+	if err != nil {
+		return
+	}
+	status := "agent disconnected: " + reason
+	for _, c := range all {
+		if c.NodeID != nodeID {
+			continue
+		}
+		if c.State != "starting" && c.State != "stopping" {
+			continue
+		}
+		_ = m.store.UpdateContainerState(ctx, c.ID, c.DockerID, "error", status)
+		_ = m.store.FreeGPUs(ctx, c.ID)
+		m.publish(NodeUpdate{NodeID: nodeID, Kind: "container", At: time.Now()})
+	}
 }
 
 func (m *Manager) Get(nodeID string) *Session {
@@ -267,12 +296,16 @@ func (s *Session) handleMetrics(ctx context.Context, mgr *Manager, r *pb.MetricR
 }
 
 func (s *Session) handleContainerCreated(ctx context.Context, mgr *Manager, c *pb.ContainerCreated) {
-	state, status := "created", "created"
+	// The agent's docker.Create does create+start in one shot
+	// (internal/agent/docker/client.go:179-181), so a successful ack
+	// means the container is already running. Treat it as such and
+	// collapse the old "created" intermediate state.
+	state, status := "running", "running"
 	if c.Error != "" {
 		state, status = "error", c.Error
-		// Release any GPU reservation we made on the master side \u2014
-		// the container never came up so those devices should be
-		// available to other workloads.
+		// Release any GPU reservation we made on the master side — the
+		// container never came up so those devices should be available
+		// to other workloads.
 		_ = mgr.store.FreeGPUs(ctx, c.ContainerId)
 	}
 	_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, state, status)
