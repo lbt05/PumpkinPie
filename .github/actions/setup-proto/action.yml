@@ -1,0 +1,29 @@
+# Composite action: install protoc + the Go proto plugins used by `make proto`,
+# then run `make proto` so `proto/gen/` is populated before any `go build` step.
+#
+# Required env: a Go toolchain already on PATH (e.g. via actions/setup-go).
+
+name: setup proto
+description: Install protoc, protoc-gen-go, protoc-gen-go-grpc and run make proto
+
+runs:
+  using: composite
+  steps:
+    - name: Install protoc
+      uses: arduino/setup-protoc@v2
+      with:
+        # Pin to a recent stable release. Bump when a new proto3 feature
+        # is needed or a CVE hits; protoc is API-stable for our usage.
+        version: '25.1'
+
+    - name: Install Go proto plugins
+      # Versions match the libraries declared in go.mod so the generated
+      # code is byte-identical (or as close as possible) to local output.
+      shell: bash
+      run: |
+        go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+        go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+
+    - name: Generate proto
+      shell: bash
+      run: make proto
