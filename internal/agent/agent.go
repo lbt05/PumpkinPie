@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 
 	"github.com/pumpkinpie/pumpkinpie/internal/agent/collector"
 	"github.com/pumpkinpie/pumpkinpie/internal/agent/docker"
+	"github.com/pumpkinpie/pumpkinpie/internal/buildinfo"
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
 )
 
@@ -60,10 +62,11 @@ func New(masterAddr, nodeName, machineID string) (*Agent, error) {
 // Run blocks until ctx is cancelled, reconnecting on failure with backoff.
 func (a *Agent) Run(ctx context.Context) error {
 	defer a.docker.Close()
-	hostname, osStr, arch, version, err := collector.HostInfo()
+	hostname, osStr, arch, err := collector.HostInfo()
 	if err != nil {
 		return fmt.Errorf("host info: %w", err)
 	}
+	version := normalizeAgentVersion(buildinfo.Version)
 
 	backoff := time.Second
 	for {
@@ -86,6 +89,16 @@ func (a *Agent) Run(ctx context.Context) error {
 			backoff = 5 * time.Second
 		}
 	}
+}
+
+// normalizeAgentVersion strips the leading "v" from a semver tag so
+// the value stored in the master's `nodes.agent_version` column is
+// the bare version ("1.2.3") rather than the git tag form ("v1.2.3").
+// The web UI's "agent v{{ ... }}" template re-adds the prefix on
+// display, keeping the API contract stable for any external scripts
+// that query agent_version directly.
+func normalizeAgentVersion(v string) string {
+	return strings.TrimPrefix(v, "v")
 }
 
 func (a *Agent) serve(ctx context.Context, hostname, os, arch, version string) error {

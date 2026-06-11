@@ -26,13 +26,17 @@ func New(nodeName string) *Collector {
 	return &Collector{nodeName: nodeName}
 }
 
-// HostInfo returns static host info for the RegisterRequest.
-func HostInfo() (hostname, os, arch, version string, err error) {
+// HostInfo returns static host info for the RegisterRequest (hostname,
+// OS, kernel arch). The build version is owned by the caller — see
+// buildinfo.Version — and is forwarded separately in the Register
+// message. Keeping HostInfo version-free avoids dragging the global
+// into the collector package.
+func HostInfo() (hostname, os, arch string, err error) {
 	h, err := host.Info()
 	if err != nil {
-		return "", "", "", "", err
+		return "", "", "", err
 	}
-	return h.Hostname, h.OS, h.KernelArch, "0.1.0", nil
+	return h.Hostname, h.OS, h.KernelArch, nil
 }
 
 func (c *Collector) Collect(ctx context.Context) *pb.MetricReport {

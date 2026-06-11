@@ -16,15 +16,9 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/pumpkinpie/pumpkinpie/internal/buildinfo"
 	"github.com/pumpkinpie/pumpkinpie/internal/cmd/agent"
 	"github.com/pumpkinpie/pumpkinpie/internal/cmd/master"
-)
-
-// These three vars are populated by `-ldflags "-X ..."` at link time.
-var (
-	Version   = "dev"
-	Commit    = "unknown"
-	BuildTime = "unknown"
 )
 
 func main() {
@@ -43,9 +37,9 @@ func main() {
 	case "agent":
 		err = agentcmd.Run(ctx, args)
 	case "version", "-v", "--version":
-		fmt.Printf("pp %s\n", Version)
-		fmt.Printf("  commit:     %s\n", Commit)
-		fmt.Printf("  built:      %s\n", BuildTime)
+		fmt.Printf("pp %s\n", buildinfo.Version)
+		fmt.Printf("  commit:     %s\n", buildinfo.Commit)
+		fmt.Printf("  built:      %s\n", buildinfo.BuildTime)
 		fmt.Printf("  go version: %s\n", runtime.Version())
 		fmt.Printf("  platform:   %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		return

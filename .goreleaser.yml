@@ -31,9 +31,9 @@ builds:
     ldflags:
       # The Makefile uses the same ldflags; keep these in lockstep.
       - -s -w
-      - -X main.Version={{.Version}}
-      - -X main.Commit={{.ShortCommit}}
-      - -X main.BuildTime={{.CommitDate}}
+      - -X github.com/pumpkinpie/pumpkinpie/internal/buildinfo.Version={{.Version}}
+      - -X github.com/pumpkinpie/pumpkinpie/internal/buildinfo.Commit={{.ShortCommit}}
+      - -X github.com/pumpkinpie/pumpkinpie/internal/buildinfo.BuildTime={{.CommitDate}}
     goos:
       - linux
       - darwin

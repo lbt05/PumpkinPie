@@ -11,9 +11,9 @@ PROTO_OUT := proto/gen
 VERSION   ?= dev
 COMMIT    ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-LDFLAGS   := -X main.Version=$(VERSION) \
-             -X main.Commit=$(COMMIT) \
-             -X main.BuildTime=$(BUILD_TIME)
+LDFLAGS   := -X github.com/pumpkinpie/pumpkinpie/internal/buildinfo.Version=$(VERSION) \
+             -X github.com/pumpkinpie/pumpkinpie/internal/buildinfo.Commit=$(COMMIT) \
+             -X github.com/pumpkinpie/pumpkinpie/internal/buildinfo.BuildTime=$(BUILD_TIME)
 
 .PHONY: all
 all: proto web-deps web-build build
