@@ -7,6 +7,7 @@
 #
 # Flags (after the role):
 #   --version <vX.Y.Z>       pin a release (default: latest)
+#   --prerelease             include pre-releases when resolving "latest"
 #   --data-dir <path>        master: SQLite + state dir       (default: /var/lib/pp)
 #   --state-dir <path>       agent: machine-id persistence    (default: /var/lib/pp-agent)
 #   --bin <path>             where to install the binary      (default: /usr/local/bin/pp)
@@ -15,11 +16,12 @@
 #   --master <host:port>     agent: master address to dial    (default: pp-master.internal:7000)
 #   --name <hostname>        agent: node name                 (default: %H)
 #   --no-systemd             install binary only, skip unit
+#   --dry-run                show what would happen, don't install
 #   -h, --help               this help
 #
 # Environment overrides (same names, no leading --):
 #   PP_VERSION, PP_BIN, PP_DATA_DIR, PP_STATE_DIR, PP_HTTP, PP_GRPC,
-#   PP_MASTER_ADDR, PP_NAME, PP_NO_SYSTEMD
+#   PP_MASTER_ADDR, PP_NAME, PP_NO_SYSTEMD, PP_PRERELEASE
 #
 # Reference implementation only — keep this file POSIX-ish bash.
 # Tested on: Ubuntu 20.04+, Debian 11+, RHEL 9+, Amazon Linux 2023,
@@ -42,6 +44,7 @@ PP_GRPC="${PP_GRPC:-0.0.0.0:7000}"
 PP_MASTER_ADDR="${PP_MASTER_ADDR:-pp-master.internal:7000}"
 PP_NAME="${PP_NAME:-}"
 PP_NO_SYSTEMD="${PP_NO_SYSTEMD:-}"
+PP_PRERELEASE="${PP_PRERELEASE:-}"
 DRY_RUN="${PP_DRY_RUN:-}"
 
 # --- helpers -----------------------------------------------------------------
@@ -50,7 +53,31 @@ warn() { printf '\033[1;33m==>\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'
+  cat <<'EOF'
+get.sh — install pumpkinPie from a GitHub Release.
+
+Usage:
+  curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh | sudo bash -s -- master
+  curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh | sudo bash -s -- agent
+
+Flags (after the role):
+  --version <vX.Y.Z>       pin a release (default: latest)
+  --prerelease             include pre-releases when resolving "latest"
+  --data-dir <path>        master: SQLite + state dir       (default: /var/lib/pp)
+  --state-dir <path>       agent: machine-id persistence    (default: /var/lib/pp-agent)
+  --bin <path>             where to install the binary      (default: /usr/local/bin/pp)
+  --http <addr>            master: HTTP listen addr         (default: 0.0.0.0:8080)
+  --grpc <addr>            master: gRPC listen addr         (default: 0.0.0.0:7000)
+  --master <host:port>     agent: master address to dial    (default: pp-master.internal:7000)
+  --name <hostname>        agent: node name                 (default: %H)
+  --no-systemd             install binary only, skip unit
+  --dry-run                show what would happen, don't install
+  -h, --help               this help
+
+Environment overrides (same names, no leading --):
+  PP_VERSION, PP_BIN, PP_DATA_DIR, PP_STATE_DIR, PP_HTTP, PP_GRPC,
+  PP_MASTER_ADDR, PP_NAME, PP_NO_SYSTEMD, PP_PRERELEASE
+EOF
 }
 
 # --- arg parse ---------------------------------------------------------------
@@ -67,6 +94,7 @@ while [[ $# -gt 0 ]]; do
     --master)       PP_MASTER_ADDR="$2"; shift 2 ;;
     --name)         PP_NAME="$2"; shift 2 ;;
     --no-systemd)   PP_NO_SYSTEMD=1; shift ;;
+    --prerelease)   PP_PRERELEASE=1; shift ;;
     --dry-run)      DRY_RUN=1; shift ;;
     *) die "unknown flag: $1 (try --help)" ;;
   esac
@@ -74,7 +102,14 @@ done
 
 # env overrides for everything except role/version
 [[ -n "${PP_VERSION:-}"   ]] && VERSION="$PP_VERSION"
-[[ -n "${PP_NO_SYSTEMD:-}" && -z "$PP_NO_SYSTEMD" ]] && PP_NO_SYSTEMD=1
+# Normalize PP_NO_SYSTEMD / PP_PRERELEASE to either "1" or empty so downstream
+# `[[ "$X" != "1" ]]` checks work the same for `1`, `true`, `yes`, `on`.
+for var in PP_NO_SYSTEMD PP_PRERELEASE; do
+  case "${!var:-}" in
+    1|true|TRUE|yes|YES|on|ON) printf -v "$var" '%s' 1 ;;
+    *)                          printf -v "$var" '%s' '' ;;
+  esac
+done
 
 [[ -z "$ROLE" ]] && die "missing role. usage: $0 master|agent [flags]"
 
@@ -101,25 +136,64 @@ if [[ "$OS" == "linux" && "$PP_NO_SYSTEMD" != "1" ]] && ! command -v systemctl >
   PP_NO_SYSTEMD=1
 fi
 
+# --- temp workspace ----------------------------------------------------------
+TMP="$(mktemp -d -t pp-install.XXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+
+# --- resolve release version -------------------------------------------------
 if [[ -z "$VERSION" ]]; then
-  log "resolving latest release"
-  # GitHub returns 403 once you exhaust the unauthenticated rate limit;
-  # fall back to the redirect-based "latest" semantic on the releases
-  # page if the API call fails. In practice this almost never happens.
-  VERSION="$(curl -sSfL -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest" \
-    | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
-  if [[ -z "$VERSION" ]]; then
-    die "could not determine latest release (rate-limited or offline?). pass --version vX.Y.Z."
+  if [[ "$PP_PRERELEASE" == "1" ]]; then
+    log "resolving latest release (incl. pre-releases)"
+    api="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases?per_page=1"
+  else
+    log "resolving latest release"
+    api="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/releases/latest"
   fi
+
+  # Capture the HTTP status separately so a 4xx doesn't kill the pipeline
+  # under `set -euo pipefail`. Auth header is optional; if GITHUB_TOKEN is
+  # exported we use it to dodge the unauthenticated rate limit.
+  auth=()
+  [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+  http_code="$(curl -sSL -o "$TMP/release.json" -w '%{http_code}' \
+    -H 'Accept: application/vnd.github+json' \
+    ${auth[@]+"${auth[@]}"} "$api" || echo 000)"
+
+  case "$http_code" in
+    200)
+      VERSION="$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' \
+        "$TMP/release.json" | head -n1)"
+      if [[ -z "$VERSION" ]]; then
+        if [[ "$PP_PRERELEASE" == "1" ]]; then
+          die "no releases (stable or pre-release) found in ${GITHUB_OWNER}/${GITHUB_REPO}. Cut one or pass --version vX.Y.Z."
+        else
+          die "no stable releases found. Add --prerelease to include RC/beta tags, or pass --version vX.Y.Z."
+        fi
+      fi
+      ;;
+    404)
+      if [[ "$PP_PRERELEASE" == "1" ]]; then
+        die "${GITHUB_OWNER}/${GITHUB_REPO} not found, or has no releases at all. Pass --version vX.Y.Z."
+      else
+        die "${GITHUB_OWNER}/${GITHUB_REPO} has no published stable releases. Add --prerelease to include RC/beta tags, or pass --version vX.Y.Z."
+      fi
+      ;;
+    403)
+      die "GitHub API rate-limited (HTTP 403). Export GITHUB_TOKEN, or pass --version vX.Y.Z."
+      ;;
+    000)
+      die "could not reach api.github.com (offline?). Pass --version vX.Y.Z."
+      ;;
+    *)
+      die "unexpected HTTP $http_code from $api. Pass --version vX.Y.Z."
+      ;;
+  esac
 fi
 # Accept both `vX.Y.Z` and `X.Y.Z`; the asset names use `v` prefix.
 case "$VERSION" in v*) ;; *) VERSION="v$VERSION" ;; esac
 log "installing ${PROJECT_NAME} ${VERSION} (${ROLE}) on ${OS}/${GOARCH}"
 
 # --- download + verify --------------------------------------------------------
-TMP="$(mktemp -d -t pp-install.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
 [[ -n "$DRY_RUN" ]] && log "DRY RUN: would download to $TMP"
 
 ASSET="${PROJECT_NAME}_${VERSION}_${OS}_${GOARCH}.tar.gz"
@@ -139,7 +213,13 @@ if [[ -z "$DRY_RUN" ]]; then
   if [[ -z "$expected" ]]; then
     die "no checksum found for $ASSET in checksums.txt"
   fi
-  actual="$(sha256sum "$TARBALL" | awk '{print $1}')"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$TARBALL" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
+  else
+    die "neither sha256sum nor shasum found; cannot verify $ASSET"
+  fi
   [[ "$expected" == "$actual" ]] || die "checksum mismatch:
   expected: $expected
   actual:   $actual"
@@ -151,7 +231,9 @@ if [[ -z "$DRY_RUN" ]]; then
   tar -xzf "$TARBALL" -C "$TMP"
 fi
 BIN_SRC="$TMP/$PROJECT_NAME"
-[[ -z "$DRY_RUN" && -f "$BIN_SRC" ]] || die "binary not found in archive: $BIN_SRC"
+if [[ -z "$DRY_RUN" && ! -f "$BIN_SRC" ]]; then
+  die "binary not found in archive: $BIN_SRC"
+fi
 
 if [[ -n "$DRY_RUN" ]]; then
   log "DRY RUN: would install $BIN_SRC -> $PP_BIN"
