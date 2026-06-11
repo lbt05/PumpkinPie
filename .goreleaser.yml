@@ -40,11 +40,6 @@ builds:
     goarch:
       - amd64
       - arm64
-    # Skip macOS .DS_Store and the web dev artifacts.
-    ignore:
-      - goos: darwin
-        goarch: arm64
-        # No macOS/arm64 skip rule today; included for parity with linux.
 
 # Archive layout — one tar.gz per (os, arch).
 archives:
