@@ -370,8 +370,45 @@ func (s *Server) createContainer(c *gin.Context) {
 		externalPort = p
 	}
 
-	// Allocate GPUs (exclusive reservation). If any step below fails we
-	// must release them; track via `gpuAllocated`.
+	envJSON, _ := json.Marshal(req.Env)
+	cmdJSON, _ := json.Marshal(req.Cmd)
+	portsJSON, _ := json.Marshal(ports)
+	volBinds, _ := json.Marshal(req.VolumeBinds)
+
+	// Insert the container row BEFORE allocating GPUs: gpu_alloc has
+	// FOREIGN KEY (container_id) REFERENCES containers(id), and SQLite
+	// enforces FKs (foreign_keys=ON in store.Open). Inserting gpu_alloc
+	// first would fail with "FOREIGN KEY constraint failed (787)".
+	// gpu_indices_json is patched in via UpdateContainerGPUIndices once
+	// we know which indices were reserved.
+	cc := &store.Container{
+		ID:             containerID,
+		NodeID:         target.ID,
+		Name:           containerName,
+		Image:          req.Image,
+		State:          "starting",
+		Status:         "starting",
+		EnvJSON:        string(envJSON),
+		CmdJSON:        string(cmdJSON),
+		PortsJSON:      string(portsJSON),
+		VolumeBinds:    string(volBinds),
+		CPUCores:       req.CPUCores,
+		MemoryBytes:    req.MemoryBytes,
+		GPUCount:       req.GPUCount,
+		GPUIndicesJSON: "",
+		ExternalPort:   externalPort,
+	}
+	if err := s.store.InsertContainer(c.Request.Context(), cc); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		if externalPort != 0 {
+			_ = s.store.FreePort(c.Request.Context(), externalPort)
+		}
+		return
+	}
+	containerInserted := true
+
+	// Reserve GPUs (exclusive). On any failure below this line, the
+	// deferred cleanup releases everything we acquired.
 	var gpuIndices []uint32
 	gpuAllocated := false
 	if req.GPUCount > 0 {
@@ -392,53 +429,38 @@ func (s *Server) createContainer(c *gin.Context) {
 			} else {
 				c.JSON(500, gin.H{"error": err.Error()})
 			}
-			if externalPort != 0 {
-				_ = s.store.FreePort(c.Request.Context(), externalPort)
-			}
 			return
+		}
+		if len(gpuIndices) > 0 {
+			b, _ := json.Marshal(gpuIndices)
+			if err := s.store.UpdateContainerGPUIndices(c.Request.Context(), containerID, string(b)); err != nil {
+				c.JSON(500, gin.H{"error": "persist gpu indices: " + err.Error()})
+				return
+			}
+			cc.GPUIndicesJSON = string(b)
 		}
 		gpuAllocated = true
 	}
+
+	// Cleanup on any failure path between here and successful hand-off
+	// to the agent. The agent then owns the container and is responsible
+	// for releasing its own GPU reservations (via its lifecycle callbacks
+	// or an explicit delete).
+	handedOff := false
 	defer func() {
+		if handedOff {
+			return
+		}
 		if gpuAllocated {
 			_ = s.store.FreeGPUs(c.Request.Context(), containerID)
 		}
-	}()
-
-	envJSON, _ := json.Marshal(req.Env)
-	cmdJSON, _ := json.Marshal(req.Cmd)
-	portsJSON, _ := json.Marshal(ports)
-	volBinds, _ := json.Marshal(req.VolumeBinds)
-	gpuIdxJSON := ""
-	if len(gpuIndices) > 0 {
-		b, _ := json.Marshal(gpuIndices)
-		gpuIdxJSON = string(b)
-	}
-
-	cc := &store.Container{
-		ID:             containerID,
-		NodeID:         target.ID,
-		Name:           containerName,
-		Image:          req.Image,
-		State:          "starting",
-		Status:         "starting",
-		EnvJSON:        string(envJSON),
-		CmdJSON:        string(cmdJSON),
-		PortsJSON:      string(portsJSON),
-		VolumeBinds:    string(volBinds),
-		CPUCores:       req.CPUCores,
-		MemoryBytes:    req.MemoryBytes,
-		GPUCount:       req.GPUCount,
-		GPUIndicesJSON: gpuIdxJSON,
-		ExternalPort:   externalPort,
-	}
-	if err := s.store.InsertContainer(c.Request.Context(), cc); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
+		if containerInserted {
+			_ = s.store.DeleteContainer(c.Request.Context(), containerID)
+		}
 		if externalPort != 0 {
 			_ = s.store.FreePort(c.Request.Context(), externalPort)
 		}
-		return
-	}
+	}()
 
 	// Register proxy route and bind the listener for this container's port.
 	if externalPort != 0 && len(ports) > 0 {
@@ -472,10 +494,8 @@ func (s *Server) createContainer(c *gin.Context) {
 		return
 	}
 
-	// Hand-off succeeded: do NOT release the GPUs in the deferred cleanup.
-	// The agent now owns the container; its lifecycle callbacks (or an
-	// explicit delete) are responsible for FreeGPUs.
-	gpuAllocated = false
+	// Hand-off succeeded: agent owns the container from here on.
+	handedOff = true
 
 	resp := gin.H{
 		"container":    cc,

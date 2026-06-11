@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -333,5 +334,40 @@ func TestListGPUAllocsForNode_EmptyWhenNoneHeld(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("expected empty, got %+v", got)
+	}
+}
+
+// TestAllocGPUs_RequiresContainerFirst pins the FK contract that the
+// api.createContainer handler depends on: gpu_alloc.container_id
+// REFERENCES containers(id), so the container row MUST exist before
+// any GPU reservation is made. The api previously called AllocGPUs
+// before InsertContainer and got back "FOREIGN KEY constraint failed
+// (787)" from SQLite (foreign_keys=ON). If you re-order those calls
+// in the api, this test will still pass — but the integration symptom
+// will reappear in the field. Treat this test as the contract: the
+// store is correct, the ordering is the caller's responsibility.
+func TestAllocGPUs_RequiresContainerFirst(t *testing.T) {
+	s, _ := openTestStore(t)
+	ctx := context.Background()
+	seedNode(t, s, "n1", 4)
+
+	// No container row exists yet — must fail.
+	if _, err := s.AllocGPUs(ctx, "n1", "ghost", 1, 4); err == nil {
+		t.Fatal("expected FK error for unknown container_id, got nil")
+	} else if !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("expected FOREIGN KEY error, got: %v", err)
+	}
+
+	// Insert the container, then alloc — must succeed.
+	seedContainer(t, s, "c1", "n1")
+	if _, err := s.AllocGPUs(ctx, "n1", "c1", 1, 4); err != nil {
+		t.Fatalf("alloc after insert should succeed, got %v", err)
+	}
+
+	// Same contract for AllocSpecificGPUs.
+	if err := s.AllocSpecificGPUs(ctx, "n1", "ghost2", []uint32{2}); err == nil {
+		t.Fatal("expected FK error from AllocSpecificGPUs, got nil")
+	} else if !strings.Contains(err.Error(), "FOREIGN KEY") {
+		t.Errorf("expected FOREIGN KEY error, got: %v", err)
 	}
 }
