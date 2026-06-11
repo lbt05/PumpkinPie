@@ -9,6 +9,10 @@
 web/node_modules/
 web/dist/*
 !web/dist/.gitkeep
+# TypeScript incremental build cache (written by `vue-tsc -b`).
+# If we ever switch back to -b, this must remain ignored — otherwise
+# `npm run build` dirties the working tree and GoReleaser refuses to release.
+web/tsconfig.tsbuildinfo
 .env.local
 
 # Generated proto

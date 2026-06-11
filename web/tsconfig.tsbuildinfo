@@ -1,1 +1,0 @@
-{"root":["./src/env.d.ts","./src/main.ts","./src/router.ts","./src/api/client.ts","./src/i18n/en.ts","./src/i18n/index.ts","./src/i18n/zh-cn.ts","./src/app.vue","./src/components/appsidebar.vue","./src/views/containersview.vue","./src/views/createcontainerview.vue","./src/views/dashboardview.vue","./src/views/nodesview.vue"],"version":"5.9.3"}
