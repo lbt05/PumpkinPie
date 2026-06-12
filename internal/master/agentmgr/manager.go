@@ -7,8 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc/peer"
 
 	"github.com/pumpkinpie/pumpkinpie/internal/master/store"
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
@@ -59,7 +62,7 @@ func (m *Manager) OnAgentConnect(ctx context.Context, stream pb.AgentService_Con
 		return nil, "", err
 	}
 
-	sess := newSession(nodeID, stream)
+	sess := newSession(nodeID, stream, remoteHostFromContext(ctx))
 	m.mu.Lock()
 	if old, ok := m.sessions[nodeID]; ok {
 		old.close("superseded by new connection")
@@ -223,26 +226,31 @@ func (m *Manager) publish(u NodeUpdate) {
 
 type Session struct {
 	NodeID string
-	stream pb.AgentService_ConnectServer
-	sendMu sync.Mutex
-	closed chan struct{}
-	once   sync.Once
-
-	// proxy data from agent -> master (per-tunnel buffers)
-	proxyMu     sync.Mutex
-	proxyBuffer map[string]chan *pb.ProxyTunnelData  // tunnel_id -> buffered data
-	proxyClose  map[string]chan string              // tunnel_id -> close reason
+	// remoteHost is the IP / hostname the agent's gRPC connection
+	// came from, used by the proxy to dial back to the agent's
+	// published container ports. Captured at OnAgentConnect from
+	// the gRPC peer info.
+	remoteHost string
+	stream     pb.AgentService_ConnectServer
+	sendMu     sync.Mutex
+	closed     chan struct{}
+	once       sync.Once
 }
 
-func newSession(nodeID string, stream pb.AgentService_ConnectServer) *Session {
+func newSession(nodeID string, stream pb.AgentService_ConnectServer, remoteHost string) *Session {
 	return &Session{
-		NodeID:      nodeID,
-		stream:      stream,
-		closed:      make(chan struct{}),
-		proxyBuffer: make(map[string]chan *pb.ProxyTunnelData),
-		proxyClose:  make(map[string]chan string),
+		NodeID:     nodeID,
+		remoteHost: remoteHost,
+		stream:     stream,
+		closed:     make(chan struct{}),
 	}
 }
+
+// RemoteHost returns the host part of the agent's gRPC peer address.
+// Returns "" if the address was not available at connect time, in
+// which case the proxy should fall back to the node's reported
+// hostname.
+func (s *Session) RemoteHost() string { return s.remoteHost }
 
 func (s *Session) handleIncoming(ctx context.Context, mgr *Manager, msg *pb.AgentMessage) {
 	switch p := msg.Payload.(type) {
@@ -257,10 +265,6 @@ func (s *Session) handleIncoming(ctx context.Context, mgr *Manager, msg *pb.Agen
 		s.handleContainerStopped(ctx, mgr, p.ContainerStopped)
 	case *pb.AgentMessage_ContainerStarted:
 		s.handleContainerStarted(ctx, mgr, p.ContainerStarted)
-	case *pb.AgentMessage_ProxyData:
-		s.deliverProxyData(p.ProxyData)
-	case *pb.AgentMessage_ProxyClose:
-		s.deliverProxyClose(p.ProxyClose)
 	}
 }
 
@@ -345,79 +349,20 @@ func (s *Session) Send(msg *pb.MasterMessage) error {
 	return s.stream.Send(msg)
 }
 
-// ---- Proxy data delivery (from agent to local listener) ----
-
-func (s *Session) RegisterProxy(tunnelID string, bufSize int) {
-	s.proxyMu.Lock()
-	defer s.proxyMu.Unlock()
-	if _, ok := s.proxyBuffer[tunnelID]; !ok {
-		s.proxyBuffer[tunnelID] = make(chan *pb.ProxyTunnelData, bufSize)
-		s.proxyClose[tunnelID] = make(chan string, 1)
-	}
-}
-
-func (s *Session) UnregisterProxy(tunnelID string) {
-	s.proxyMu.Lock()
-	defer s.proxyMu.Unlock()
-	delete(s.proxyBuffer, tunnelID)
-	delete(s.proxyClose, tunnelID)
-}
-
-func (s *Session) ProxyDataChan(tunnelID string) <-chan *pb.ProxyTunnelData {
-	s.proxyMu.Lock()
-	defer s.proxyMu.Unlock()
-	if ch, ok := s.proxyBuffer[tunnelID]; ok {
-		return ch
-	}
-	ch := make(chan *pb.ProxyTunnelData, 64)
-	s.proxyBuffer[tunnelID] = ch
-	return ch
-}
-
-func (s *Session) ProxyCloseChan(tunnelID string) <-chan string {
-	s.proxyMu.Lock()
-	defer s.proxyMu.Unlock()
-	if ch, ok := s.proxyClose[tunnelID]; ok {
-		return ch
-	}
-	ch := make(chan string, 1)
-	s.proxyClose[tunnelID] = ch
-	return ch
-}
-
-func (s *Session) deliverProxyData(d *pb.ProxyTunnelData) {
-	s.proxyMu.Lock()
-	ch, ok := s.proxyBuffer[d.TunnelId]
-	s.proxyMu.Unlock()
-	if !ok {
-		s.ProxyDataChan(d.TunnelId) // create
-		s.proxyMu.Lock()
-		ch = s.proxyBuffer[d.TunnelId]
-		s.proxyMu.Unlock()
-	}
-	select {
-	case ch <- d:
-	case <-s.closed:
-	}
-}
-
-func (s *Session) deliverProxyClose(d *pb.ProxyTunnelClose) {
-	s.proxyMu.Lock()
-	ch, ok := s.proxyClose[d.TunnelId]
-	s.proxyMu.Unlock()
-	if !ok {
-		s.ProxyCloseChan(d.TunnelId) // create
-		s.proxyMu.Lock()
-		ch = s.proxyClose[d.TunnelId]
-		s.proxyMu.Unlock()
-	}
-	select {
-	case ch <- d.Reason:
-	default:
-	}
-}
-
 // ---- utils ----
+
+func remoteHostFromContext(ctx context.Context) string {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p == nil || p.Addr == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(p.Addr.String())
+	if err != nil {
+		// Some transports return an addr without a port; use as-is.
+		return p.Addr.String()
+	}
+	return host
+}
 
 func randomID() (string, error) {
 	var b [8]byte

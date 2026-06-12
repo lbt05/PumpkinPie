@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"net"
 	"strings"
 	"sync"
 	"time"
@@ -31,17 +29,6 @@ type Agent struct {
 
 	streamMu sync.Mutex
 	stream   pb.AgentService_ConnectClient
-
-	// active proxy tunnels
-	tunnelMu sync.Mutex
-	tunnels  map[string]*tunnel
-}
-
-type tunnel struct {
-	cancel   context.CancelFunc
-	dataCh   chan *pb.ProxyTunnelData
-	closeCh  chan struct{}
-	finished chan struct{}
 }
 
 func New(masterAddr, nodeName, machineID string) (*Agent, error) {
@@ -55,7 +42,6 @@ func New(masterAddr, nodeName, machineID string) (*Agent, error) {
 		machineID:  machineID,
 		collector:  collector.New(nodeName),
 		docker:     dc,
-		tunnels:    make(map[string]*tunnel),
 	}, nil
 }
 
@@ -166,7 +152,6 @@ func (a *Agent) serve(ctx context.Context, hostname, os, arch, version string) e
 	for {
 		msg, err := stream.Recv()
 		if err != nil {
-			a.closeAllTunnels()
 			return err
 		}
 		a.handleMasterMessage(ctx, msg)
@@ -210,12 +195,6 @@ func (a *Agent) handleMasterMessage(ctx context.Context, msg *pb.MasterMessage) 
 		go a.handleStop(ctx, p.StopContainer)
 	case *pb.MasterMessage_StartContainer:
 		go a.handleStart(ctx, p.StartContainer)
-	case *pb.MasterMessage_OpenTunnel:
-		go a.handleOpenTunnel(p.OpenTunnel)
-	case *pb.MasterMessage_ProxyData:
-		a.handleProxyDataFromMaster(p.ProxyData)
-	case *pb.MasterMessage_ProxyClose:
-		a.handleProxyCloseFromMaster(p.ProxyClose)
 	}
 }
 
@@ -250,223 +229,6 @@ func (a *Agent) handleStart(ctx context.Context, cmd *pb.StartContainerCommand) 
 		log.Printf("started container %s (docker %s) on %s", cmd.ContainerId, shortID(cmd.DockerId), a.nodeName)
 	}
 	_ = a.send(&pb.AgentMessage{Payload: &pb.AgentMessage_ContainerStarted{ContainerStarted: resp}})
-}
-
-// ---- Proxy tunnel ----
-
-// handleOpenTunnel opens a TCP connection to the docker container's mapped host port
-// and starts a goroutine that streams data both ways. The tunnel struct is
-// registered synchronously so the very next ProxyData message — which can
-// arrive in the same gRPC Recv batch — can find it.
-func (a *Agent) handleOpenTunnel(cmd *pb.OpenTunnel) {
-	ctx, cancel := context.WithCancel(context.Background())
-	t := &tunnel{
-		cancel:   cancel,
-		dataCh:   make(chan *pb.ProxyTunnelData, 32),
-		closeCh:  make(chan struct{}),
-		finished: make(chan struct{}),
-	}
-	a.tunnelMu.Lock()
-	a.tunnels[cmd.TunnelId] = t
-	a.tunnelMu.Unlock()
-
-	go a.runTunnel(ctx, cmd, t)
-}
-
-// runTunnel connects to the container, reads request bytes from dataCh (filled by
-// handleProxyDataFromMaster) and writes them to the container. Reads from the
-// container are sent back as ProxyTunnelData to the master.
-func (a *Agent) runTunnel(ctx context.Context, cmd *pb.OpenTunnel, t *tunnel) {
-	defer close(t.finished)
-	defer a.removeTunnel(cmd.TunnelId)
-
-	// Prefer the host_port the master told us about — it knows the
-	// value from the create request and we just told Docker to bind
-	// that exact number, so we can skip the Docker port-mapping query.
-	// Fall back to a Docker lookup when host_port is 0 (legacy master
-	// that pre-dates the field).
-	var (
-		dockerID string
-		hostPort uint16
-	)
-	if cmd.HostPort != 0 {
-		hostPort = uint16(cmd.HostPort)
-		// Still need the docker ID for the log line; cheap because the
-		// result is cached by gopsutil's ListAgent path.
-		var err error
-		dockerID, err = a.lookupDockerID(cmd.ContainerId)
-		if err != nil {
-			log.Printf("tunnel %s resolve (no docker lookup, host_port=%d): %v", cmd.TunnelId, hostPort, err)
-			_ = a.send(&pb.AgentMessage{
-				Payload: &pb.AgentMessage_ProxyClose{ProxyClose: &pb.ProxyTunnelClose{
-					TunnelId: cmd.TunnelId, Reason: "resolve: " + err.Error(),
-				}},
-			})
-			return
-		}
-	} else {
-		var err error
-		dockerID, hostPort, err = a.resolveContainerHostPort(cmd.ContainerId, uint16(cmd.ContainerPort))
-		if err != nil {
-			log.Printf("tunnel %s resolve: %v", cmd.TunnelId, err)
-			_ = a.send(&pb.AgentMessage{
-				Payload: &pb.AgentMessage_ProxyClose{ProxyClose: &pb.ProxyTunnelClose{
-					TunnelId: cmd.TunnelId, Reason: "resolve: " + err.Error(),
-				}},
-			})
-			return
-		}
-	}
-	addr := fmt.Sprintf("127.0.0.1:%d", hostPort)
-	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-	if err != nil {
-		log.Printf("tunnel %s dial %s: %v", cmd.TunnelId, addr, err)
-		_ = a.send(&pb.AgentMessage{
-			Payload: &pb.AgentMessage_ProxyClose{ProxyClose: &pb.ProxyTunnelClose{
-				TunnelId: cmd.TunnelId, Reason: "dial: " + err.Error(),
-			}},
-		})
-		return
-	}
-	defer conn.Close()
-	log.Printf("tunnel %s -> %s (container %s, port %d)", cmd.TunnelId, addr, shortID(dockerID), cmd.ContainerPort)
-
-	// writer goroutine: read from t.dataCh and write to container
-	go func() {
-		for d := range t.dataCh {
-			if _, err := conn.Write(d.Data); err != nil {
-				return
-			}
-			if d.CloseAfter {
-				// Plain HTTP request: half-close so the container
-				// sees EOF on its read side and starts processing.
-				// Done — no further client→container bytes are
-				// expected on this tunnel.
-				_ = conn.(*net.TCPConn).CloseWrite()
-				return
-			}
-		}
-		// Upgrade requests (WebSocket, h2c) never set CloseAfter.
-		// t.dataCh gets closed when the master sends ProxyClose
-		// (e.g., the browser navigated away). Half-close so the
-		// container sees EOF and tears down the WS cleanly.
-		_ = conn.(*net.TCPConn).CloseWrite()
-	}()
-
-	// reader: read from container and send back
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := conn.Read(buf)
-		if n > 0 {
-			chunk := make([]byte, n)
-			copy(chunk, buf[:n])
-			if err := a.send(&pb.AgentMessage{
-				Payload: &pb.AgentMessage_ProxyData{ProxyData: &pb.ProxyTunnelData{
-					TunnelId: cmd.TunnelId,
-					Data:     chunk,
-				}},
-			}); err != nil {
-				return
-			}
-		}
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("tunnel %s read: %v", cmd.TunnelId, err)
-			}
-			break
-		}
-	}
-	_ = a.send(&pb.AgentMessage{
-		Payload: &pb.AgentMessage_ProxyClose{ProxyClose: &pb.ProxyTunnelClose{
-			TunnelId: cmd.TunnelId, Reason: "eof",
-		}},
-	})
-}
-
-func (a *Agent) resolveContainerHostPort(containerID string, containerPort uint16) (string, uint16, error) {
-	// List all containers, find by label
-	cs, err := a.docker.ListAgent(context.Background())
-	if err != nil {
-		return "", 0, err
-	}
-	for _, ci := range cs {
-		if ci.ContainerId == containerID {
-			hostPort, err := a.docker.MappedHostPort(context.Background(), ci.DockerId, containerPort)
-			if err != nil {
-				return ci.DockerId, 0, err
-			}
-			return ci.DockerId, hostPort, nil
-		}
-	}
-	return "", 0, fmt.Errorf("container %s not found locally", containerID)
-}
-
-// lookupDockerID returns just the docker container id for a master
-// container_id, without doing a Docker port-mapping query. Used when
-// the master already supplied the agent-side host port in OpenTunnel
-// and we only need the docker id for logging / correlation.
-func (a *Agent) lookupDockerID(containerID string) (string, error) {
-	cs, err := a.docker.ListAgent(context.Background())
-	if err != nil {
-		return "", err
-	}
-	for _, ci := range cs {
-		if ci.ContainerId == containerID {
-			return ci.DockerId, nil
-		}
-	}
-	return "", fmt.Errorf("container %s not found locally", containerID)
-}
-
-func (a *Agent) handleProxyDataFromMaster(d *pb.ProxyTunnelData) {
-	// The matching OpenTunnel may not have been processed yet (the master
-	// sends both in the same gRPC stream and the agent processes them on
-	// the same Recv loop). Briefly wait for the tunnel to appear.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		a.tunnelMu.Lock()
-		t, ok := a.tunnels[d.TunnelId]
-		a.tunnelMu.Unlock()
-		if ok {
-			select {
-			case t.dataCh <- d:
-			case <-t.finished:
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			log.Printf("agent: handleProxyDataFromMaster tunnel=%s not found (timed out)", d.TunnelId)
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func (a *Agent) handleProxyCloseFromMaster(d *pb.ProxyTunnelClose) {
-	a.removeTunnel(d.TunnelId)
-}
-
-func (a *Agent) removeTunnel(id string) {
-	a.tunnelMu.Lock()
-	t, ok := a.tunnels[id]
-	if ok {
-		delete(a.tunnels, id)
-	}
-	a.tunnelMu.Unlock()
-	if ok {
-		t.cancel()
-		close(t.dataCh) // signal writer goroutine to exit
-	}
-}
-
-func (a *Agent) closeAllTunnels() {
-	a.tunnelMu.Lock()
-	for id, t := range a.tunnels {
-		t.cancel()
-		close(t.dataCh)
-		delete(a.tunnels, id)
-	}
-	a.tunnelMu.Unlock()
 }
 
 func shortID(id string) string {

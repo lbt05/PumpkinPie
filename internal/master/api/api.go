@@ -474,7 +474,7 @@ func (s *Server) createContainer(c *gin.Context) {
 
 	// Register proxy route and bind the listener for this container's port.
 	if externalPort != 0 && len(ports) > 0 {
-		s.proxy.RegisterRoute(externalPort, containerID, target.ID, ports[0].ContainerPort, ports[0].HostPort)
+		s.proxy.RegisterRoute(externalPort, containerID, target.ID, ports[0].HostPort)
 		if err := s.proxy.BindPort(s.lifetime, externalPort); err != nil {
 			log.Printf("bind proxy port %d failed: %v (container %s)", externalPort, err, containerID)
 		}
@@ -699,15 +699,14 @@ func (s *Server) startContainer(c *gin.Context) {
 	// bookkeeping, so we re-register the route then ask it to bind.
 	if cc.ExternalPort != 0 {
 		port := cc.ExternalPort
-		var firstContainerPort, firstHostPort uint32
+		var firstHostPort uint32
 		if len(cc.PortsJSON) > 0 {
 			var ports []portMappingJSON
 			if err := json.Unmarshal([]byte(cc.PortsJSON), &ports); err == nil && len(ports) > 0 {
-				firstContainerPort = ports[0].ContainerPort
 				firstHostPort = ports[0].HostPort
 			}
 		}
-		s.proxy.RegisterRoute(port, cc.ID, cc.NodeID, firstContainerPort, firstHostPort)
+		s.proxy.RegisterRoute(port, cc.ID, cc.NodeID, firstHostPort)
 		if err := s.proxy.BindPort(s.lifetime, port); err != nil {
 			log.Printf("rebind proxy port %d after start failed: %v", port, err)
 		}

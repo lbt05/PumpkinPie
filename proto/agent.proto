@@ -12,7 +12,14 @@ service AgentService {
 }
 
 // One message type per direction, switched by `payload`.
+//
+// Field numbers 10 and 11 used to carry ProxyTunnelData / ProxyTunnelClose
+// for the old in-band reverse-proxy tunnel. The master now connects
+// directly to the agent host's published container port (0.0.0.0:host_port),
+// so the in-band tunnel is gone. The numbers are reserved so we don't
+// accidentally reuse them with incompatible semantics.
 message AgentMessage {
+  reserved 10, 11;
   oneof payload {
     RegisterRequest      register       = 1;
     Heartbeat            heartbeat      = 2;
@@ -20,12 +27,11 @@ message AgentMessage {
     ContainerCreated     container_created = 4;
     ContainerStopped     container_stopped = 5;
     ContainerStarted     container_started = 8;
-    ProxyTunnelData      proxy_data     = 10;
-    ProxyTunnelClose     proxy_close    = 11;
   }
 }
 
 message MasterMessage {
+  reserved 6, 10, 11;
   oneof payload {
     RegisterResponse          register_resp      = 1;
     CreateContainerCommand    create_container   = 2;
@@ -33,21 +39,7 @@ message MasterMessage {
     StartContainerCommand     start_container    = 7;
     ListContainersRequest     list_containers    = 4;
     ListContainersResponse    list_containers_resp = 5;
-    OpenTunnel                open_tunnel        = 6;
-    ProxyTunnelData           proxy_data         = 10;
-    ProxyTunnelClose          proxy_close        = 11;
   }
-}
-
-message OpenTunnel {
-  string            tunnel_id       = 1;
-  uint32            container_port  = 2;
-  string            container_id    = 3;
-  // host_port is the port the agent should dial on its own loopback
-  // (the "Y" in `docker run -p X:Y`). When 0, the agent falls back
-  // to querying Docker for the port it actually mapped. New masters
-  // always populate this so the agent skips the Docker lookup.
-  uint32            host_port       = 4;
 }
 
 // ---------- Registration ----------
@@ -202,18 +194,4 @@ message ContainerInfo {
   uint32            external_port   = 9; // assigned by master
   ResourceSpec      resources       = 10;
   int64             created_unix_ms = 11;
-}
-
-// ---------- Proxy tunnel ----------
-// Used to forward raw bytes between Master reverse-proxy and Agent container port.
-message ProxyTunnelData {
-  string            tunnel_id       = 1;
-  uint32            container_port  = 2;
-  bytes             data            = 3;
-  bool              close_after     = 4; // half-close: container will not receive more
-}
-
-message ProxyTunnelClose {
-  string            tunnel_id       = 1;
-  string            reason          = 2;
 }

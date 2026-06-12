@@ -3,9 +3,9 @@
 A multi-node Docker container management platform with a web dashboard.
 Nodes (machines with Docker) self-register to a central **Master**, report
 live CPU / memory / disk / GPU metrics, and can be told by the Master to
-create / stop containers. Container services are exposed to the outside
-world through a single reverse-proxy port on the Master, with traffic
-tunneled over gRPC to the right node.
+create / stop containers. Each container's published port is exposed to
+the outside world through a dedicated TCP listener on the Master, which
+forwards connections directly to the agent host's published port.
 
 ```
                     ┌──────────────────────────────────┐
@@ -16,17 +16,16 @@ tunneled over gRPC to the right node.
                     │  Master (Go + Gin)               │
                     │   - /api REST                    │
                     │   - /console  built-in dashboard │
-                    │   - reverse-proxy  →  gRPC tunnel│
+                    │   - per-container TCP proxy      │
                     │   - SQLite                       │
-                    └────────────────┬─────────────────┘
-                                     │  gRPC bidirectional stream
-              ┌──────────────────────┼──────────────────────┐
-              ▼                      ▼                      ▼
-       ┌─────────────┐        ┌─────────────┐        ┌─────────────┐
-       │  Agent #1   │        │  Agent #2   │        │  Agent #N   │
-       │  Docker SDK │        │  Docker SDK │        │  Docker SDK │
-       │  metrics    │        │  metrics    │        │  metrics    │
-       └─────────────┘        └─────────────┘        └─────────────┘
+                    └──┬──────────────┬─────────────┬──┘
+                       │ gRPC ctl     │ TCP proxy   │
+                       ▼              ▼             ▼
+                ┌─────────────┐ ┌─────────────┐ ┌─────────────┐
+                │  Agent #1   │ │  Agent #2   │ │  Agent #N   │
+                │  Docker SDK │ │  Docker SDK │ │  Docker SDK │
+                │  metrics    │ │  metrics    │ │  metrics    │
+                └─────────────┘ └─────────────┘ └─────────────┘
 ```
 
 ## Features
@@ -38,8 +37,8 @@ tunneled over gRPC to the right node.
    charts in the UI.
 3. **Container creation via UI** — pick image, env, ports, resource limits
    (CPU / memory / GPU), and either auto-select the least-loaded node or
-   pin to a specific one. The Master opens a tunneled reverse proxy to the
-   resulting container.
+   pin to a specific one. The Master opens a dedicated TCP listener for
+   the container's published port and forwards connections to the agent.
 4. **Unified container list** — every container on every node is visible in
    a single table with state, status, assigned node, and public URL.
 
@@ -248,8 +247,17 @@ running containers (not the size of the port range). After deleting a
 container, its port is immediately released and reused by the next
 container.
 
-Under the hood, the Master hijacks the HTTP connection, opens a gRPC
-tunnel to the owning node, and pipes bytes both ways.
+Under the hood, the Master accepts a TCP connection on the public port,
+dials the agent host's published port (the agent registers via gRPC and
+the master remembers its peer address), and `io.Copy`s bytes both ways.
+This is protocol-agnostic — HTTP, WebSocket, HTTP/2, raw TCP services
+like Postgres or Redis all flow through transparently.
+
+> Note: the agent's published container ports are bound on `0.0.0.0`, so
+> anything that can reach the agent host on those ports can talk to the
+> container directly, bypassing the master. On untrusted networks you
+> should firewall the agent host's `30000-32767` range to allow only
+> the master's IP.
 
 ## Enabling GPUs on a node
 
@@ -338,10 +346,10 @@ Docker daemon on each GPU node.
 
 ## Architecture notes
 
-- **gRPC bidirectional stream** carries both directions of traffic on one
-  connection per agent — control (register, metrics, container state)
-  and per-request proxy data share the same stream, with `tunnel_id`
-  multiplexing.
+- **gRPC bidirectional stream** carries control traffic per agent —
+  register, metrics, container lifecycle (create / start / stop /
+  state). Proxy data flows out-of-band over direct TCP between the
+  master and the agent host's published container port.
 - **HTTP API** uses Gin; metrics are pushed to the browser over a
   WebSocket at `/api/ws`.
 - **SQLite** (`modernc.org/sqlite`, pure Go) for metadata. No external
@@ -475,12 +483,12 @@ pumpkinPie/
 │   │   ├── store/         # SQLite layer (nodes, containers, port allocation)
 │   │   ├── agentmgr/      # gRPC server, per-agent session, message dispatch
 │   │   ├── scheduler/     # idle-node selection (weighted score)
-│   │   ├── proxy/         # reverse-proxy + gRPC tunnel
+│   │   ├── proxy/         # per-container TCP listener -> agent direct dial
 │   │   └── api/           # Gin HTTP handlers + WebSocket
 │   └── agent/
 │       ├── collector/     # CPU/mem/disk/GPU via gopsutil + nvidia-smi
 │       ├── docker/        # Docker Engine HTTP client
-│       └── agent.go       # gRPC client, create/stop, tunnel pump
+│       └── agent.go       # gRPC client, create/stop, metrics loop
 └── web/                   # Vue 3 + Vite + Element Plus
     ├── src/views/         # Dashboard / Nodes / Containers / NewContainer
     └── dist/              # built static assets
