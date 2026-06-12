@@ -123,7 +123,11 @@ func (c *Client) Create(ctx context.Context, cmd *pb.CreateContainerCommand) (st
 		if hostPort == 0 {
 			hostPort = p.ContainerPort
 		}
-		portBindings[key] = []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprintf("%d", hostPort)}}
+		// Omit HostIp so Docker binds on 0.0.0.0 — mirrors the
+		// `docker run -p X:X` shorthand and lets external clients
+		// reach the published port. Security (token / firewall /
+		// reverse proxy) is the caller's responsibility.
+		portBindings[key] = []map[string]string{{"HostPort": fmt.Sprintf("%d", hostPort)}}
 	}
 
 	body := map[string]any{
