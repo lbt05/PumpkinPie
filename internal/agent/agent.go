@@ -338,9 +338,19 @@ func (a *Agent) runTunnel(ctx context.Context, cmd *pb.OpenTunnel, t *tunnel) {
 				return
 			}
 			if d.CloseAfter {
+				// Plain HTTP request: half-close so the container
+				// sees EOF on its read side and starts processing.
+				// Done — no further client→container bytes are
+				// expected on this tunnel.
 				_ = conn.(*net.TCPConn).CloseWrite()
+				return
 			}
 		}
+		// Upgrade requests (WebSocket, h2c) never set CloseAfter.
+		// t.dataCh gets closed when the master sends ProxyClose
+		// (e.g., the browser navigated away). Half-close so the
+		// container sees EOF and tears down the WS cleanly.
+		_ = conn.(*net.TCPConn).CloseWrite()
 	}()
 
 	// reader: read from container and send back

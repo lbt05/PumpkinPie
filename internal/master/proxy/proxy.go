@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -218,6 +219,13 @@ func (s *Server) bridge(clientConn net.Conn, sess *agentmgr.Session, rt *routeEn
 		return
 	}
 
+	// WebSocket / h2c / other upgrade requests need the underlying conn
+	// to stay open in both directions after the initial handshake. For
+	// plain HTTP, the request is fully serialized below and the response
+	// flows back through dataCh — no further client→container bytes are
+	// expected, so we can safely half-close the write side via CloseAfter.
+	isUpgrade := isUpgradeRequest(r)
+
 	// Serialize the parsed request (line + headers + body) to a buffer
 	// to send over the gRPC tunnel. r.Write handles Content-Length or
 	// chunked encoding for the body.
@@ -237,12 +245,20 @@ func (s *Server) bridge(clientConn net.Conn, sess *agentmgr.Session, rt *routeEn
 			ProxyData: &pb.ProxyTunnelData{
 				TunnelId:   tunnelID,
 				Data:       reqBuf,
-				CloseAfter: true,
+				CloseAfter: !isUpgrade,
 			},
 		},
 	}); err != nil {
 		respondError(clientConn, "send request: "+err.Error())
 		return
+	}
+
+	// For upgrade requests, the client will keep writing data (WS frames,
+	// h2c frames) that must reach the container. Start a reader that
+	// forwards those bytes as additional ProxyData messages and signals
+	// the agent to half-close when the client eventually closes the conn.
+	if isUpgrade {
+		go s.bridgeClientToAgent(clientConn, sess, tunnelID)
 	}
 
 	dataCh := sess.ProxyDataChan(tunnelID)
@@ -263,6 +279,64 @@ func (s *Server) bridge(clientConn net.Conn, sess *agentmgr.Session, rt *routeEn
 			return
 		}
 	}
+}
+
+// bridgeClientToAgent reads bytes the browser writes after the initial
+// request (WS frames, h2c frames) and forwards them to the agent as
+// ProxyData. When the client closes the conn, it sends ProxyClose so the
+// agent can half-close its own write side and the container sees EOF.
+// Runs only for upgrade requests — for plain HTTP the request is fully
+// serialized in bridge() and no further client→container traffic is
+// expected on the same tunnel.
+func (s *Server) bridgeClientToAgent(clientConn net.Conn, sess *agentmgr.Session, tunnelID string) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := clientConn.Read(buf)
+		if n > 0 {
+			if sendErr := sess.Send(&pb.MasterMessage{
+				Payload: &pb.MasterMessage_ProxyData{
+					ProxyData: &pb.ProxyTunnelData{
+						TunnelId:   tunnelID,
+						Data:       buf[:n],
+						CloseAfter: false,
+					},
+				},
+			}); sendErr != nil {
+				log.Printf("proxy: tunnel %s client->agent send: %v", tunnelID, sendErr)
+				return
+			}
+		}
+		if err != nil {
+			// Client closed (or read error). Tell the agent to
+			// half-close its write side so the container can finish
+			// processing. Best-effort: the tunnel is going away
+			// regardless once the conn is closed.
+			_ = sess.Send(&pb.MasterMessage{
+				Payload: &pb.MasterMessage_ProxyClose{
+					ProxyClose: &pb.ProxyTunnelClose{
+						TunnelId: tunnelID,
+						Reason:   "client closed",
+					},
+				},
+			})
+			return
+		}
+	}
+}
+
+// isUpgradeRequest reports whether the request is asking to switch
+// protocols mid-connection (WebSocket, h2c, etc.). For these the
+// proxy must keep the conn open in both directions instead of
+// half-closing after the handshake.
+func isUpgradeRequest(r *http.Request) bool {
+	for _, conn := range r.Header.Values("Connection") {
+		for _, part := range strings.Split(conn, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), "Upgrade") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func respondError(c net.Conn, msg string) {
