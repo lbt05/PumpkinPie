@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createContainer,
   fmtBytes,
@@ -14,6 +14,7 @@ import {
   type NodeGPUDevice,
   type PortMapping,
 } from '@/api/client'
+import { useCreateHistory, type HistoryEntry } from '@/composables/useCreateHistory'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -41,6 +42,12 @@ const result = ref<{ container: any; external_url?: string; node: { name: string
 const gpuDevices = ref<NodeGPUDevice[]>([])
 const loadingDevices = ref(false)
 const pickedNode = ref<string>('')
+
+const { entries: historyEntries, record: historyRecord, remove: historyRemove, clear: historyClear } = useCreateHistory()
+// Open by default as soon as the user has at least one entry; first
+// visit stays collapsed so the form starts clean.
+const historyOpen = ref(historyEntries.value.length > 0)
+const clearedToastShown = ref(false)
 
 onMounted(async () => {
   try { nodes.value = await listNodes() } catch {}
@@ -154,6 +161,8 @@ async function submit() {
     }
     const r = await createContainer(payload)
     result.value = r.data
+    historyRecord(payload, form.value.gpuMode)
+    historyOpen.value = true
     ElMessage({ type: 'success', message: t('createContainer.success') + ' — ' + r.data.node.name })
     // Smooth-scroll to result
     setTimeout(() => {
@@ -178,6 +187,79 @@ function reset() {
   form.value.volumeBinds = ''
   form.value.gpuIndices = []
   ElMessage({ type: 'info', message: t('createContainer.toastResetMsg') })
+}
+
+// ---- History ----
+
+function applyFromHistory(e: HistoryEntry) {
+  const p = e.payload
+  // Drop the stale success card so the user isn't confused by a
+  // banner that no longer matches the form.
+  result.value = null
+  form.value.image = p.image
+  form.value.name = p.name ?? ''
+  form.value.cmd = (p.cmd ?? []).join(' ')
+  form.value.envText = (p.env ?? []).join('\n')
+  form.value.volumeBinds = (p.volume_binds ?? []).join('\n')
+  form.value.ports = (p.port_mappings ?? []).length
+    ? p.port_mappings!.map((m) => ({ ...m }))
+    : [{ container_port: 80, host_port: 0, protocol: 'tcp' }]
+  form.value.cpuCores = p.cpu_cores ?? 0
+  form.value.memoryMb = p.memory_bytes ? Math.round(p.memory_bytes / (1024 * 1024)) : 0
+  form.value.gpuCount = p.gpu_count ?? 0
+  // Prefer the saved gpuMode; fall back to 'auto' for entries
+  // written before the field existed, and to 'auto' when no GPUs
+  // were requested.
+  const savedMode = e.gpuMode
+  form.value.gpuMode = savedMode && p.gpu_count && p.gpu_count > 0 ? savedMode : 'auto'
+  form.value.pull = !!p.pull
+  // gpuIndices are ephemeral: a device that was free when this
+  // recipe was saved may be held now. Let the user re-pick.
+  form.value.gpuIndices = []
+  // Pin a node only if it's still in the cluster; otherwise drop
+  // the pin and tell the user why.
+  if (p.node_id && nodes.value.some((n) => n.id === p.node_id)) {
+    form.value.nodeId = p.node_id
+  } else {
+    const hadPin = !!p.node_id
+    form.value.nodeId = ''
+    if (hadPin) {
+      ElMessage({ type: 'warning', message: t('createContainer.historyNodeDropped') })
+    }
+  }
+  ElMessage({ type: 'success', message: t('createContainer.historyApplied') })
+}
+
+async function confirmClearHistory() {
+  try {
+    await ElMessageBox.confirm(
+      t('createContainer.historyClearConfirmMsg'),
+      t('createContainer.historyClearConfirmTitle'),
+      {
+        type: 'warning',
+        confirmButtonText: t('createContainer.historyClearAll'),
+        cancelButtonText: t('common.cancel'),
+      },
+    )
+  } catch {
+    return
+  }
+  historyClear()
+  if (!clearedToastShown.value) {
+    clearedToastShown.value = true
+    ElMessage({ type: 'info', message: t('createContainer.historyCleared') })
+  }
+}
+
+function fmtAgo(ts: number): string {
+  const diff = Date.now() - ts
+  if (diff < 60_000) return t('createContainer.historyTimeJustNow')
+  const m = Math.floor(diff / 60_000)
+  if (m < 60) return t('createContainer.historyTimeAgoMin', { n: m })
+  const h = Math.floor(m / 60)
+  if (h < 24) return t('createContainer.historyTimeAgoHour', { n: h })
+  const d = Math.floor(h / 24)
+  return t('createContainer.historyTimeAgoDay', { n: d })
 }
 
 const sumImage = computed(() => form.value.image.trim() || '—')
@@ -438,6 +520,27 @@ const gpuAutoHint = computed(() => {
             <li><span>{{ t('createContainer.summaryNode') }}</span><span class="ellipsis">{{ sumNode }}</span></li>
             <li><span>{{ t('createContainer.summaryPull') }}</span><span>{{ sumPull }}</span></li>
           </ul>
+        </div>
+
+        <div class="create-history">
+          <button class="history-head" type="button" :aria-expanded="historyOpen" @click="historyOpen = !historyOpen">
+            <span class="caret" aria-hidden="true">{{ historyOpen ? '▾' : '▸' }}</span>
+            <h3>{{ t('createContainer.historyTitle') }}</h3>
+            <span v-if="historyEntries.length" class="count-pill">{{ historyEntries.length }}</span>
+          </button>
+          <ul v-if="historyOpen" class="history-list">
+            <li v-if="!historyEntries.length" class="history-empty">{{ t('createContainer.historyEmpty') }}</li>
+            <li v-for="e in historyEntries" :key="e.id" class="history-item" :title="e.label">
+              <button class="history-row" type="button" @click="applyFromHistory(e)">
+                <span class="history-label ellipsis">{{ e.label }}</span>
+                <span class="history-time">{{ fmtAgo(e.ts) }}</span>
+              </button>
+              <button class="history-x" type="button" :title="t('createContainer.historyRemove')" @click.stop="historyRemove(e.id)">×</button>
+            </li>
+          </ul>
+          <button v-if="historyOpen && historyEntries.length" class="btn is-ghost is-small history-clear" type="button" @click="confirmClearHistory">
+            {{ t('createContainer.historyClearAll') }}
+          </button>
         </div>
 
         <div class="sticky-actions">

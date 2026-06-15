@@ -349,3 +349,90 @@
 }
 
 .section-spacer { height: var(--sp-7); }
+
+/* ---------- History (Create page, right rail) ---------- */
+.create-history {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-4);
+  padding: var(--sp-4) var(--sp-5) var(--sp-4);
+}
+.history-head {
+  display: flex; align-items: center; gap: var(--sp-2);
+  width: 100%;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--text);
+}
+.history-head .caret {
+  color: var(--text-faint);
+  font-size: 12px; line-height: 1; width: 12px; text-align: center;
+}
+.history-head h3 {
+  margin: 0;
+  font: 600 var(--fs-md)/1 var(--font-display);
+  color: var(--text);
+}
+.history-head .count-pill {
+  margin-left: auto;
+  font: 600 var(--fs-xs)/1 var(--font-mono);
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+.history-list {
+  list-style: none; padding: 0; margin: var(--sp-3) 0 0;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.history-list::-webkit-scrollbar { width: 6px; }
+.history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.history-list::-webkit-scrollbar-track { background: transparent; }
+.history-empty {
+  color: var(--text-faint);
+  font: 500 var(--fs-sm)/1.4 var(--font-body);
+  font-style: italic;
+  padding: var(--sp-2) 0;
+}
+.history-item {
+  display: flex; align-items: stretch;
+  border-radius: var(--r-3);
+  transition: background 0.12s;
+}
+.history-item:hover { background: var(--bg-elev); }
+.history-row {
+  flex: 1 1 auto;
+  display: flex; flex-direction: column;
+  align-items: flex-start; justify-content: center;
+  gap: 2px;
+  background: none; border: 0; padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
+  text-align: left; cursor: pointer;
+  color: var(--text);
+  min-width: 0;
+}
+.history-label {
+  font: 500 var(--fs-sm)/1.3 var(--font-body);
+  color: var(--text);
+  width: 100%;
+}
+.history-time {
+  font: 400 var(--fs-xs)/1 var(--font-mono);
+  color: var(--text-faint);
+}
+.history-x {
+  flex: 0 0 auto;
+  width: 24px;
+  background: none; border: 0; cursor: pointer;
+  color: var(--text-faint);
+  font: 600 16px/1 var(--font-body);
+  border-radius: var(--r-3);
+  margin: 2px 2px 2px 0;
+  transition: background 0.12s, color 0.12s;
+}
+.history-x:hover { background: var(--border); color: var(--danger, #e25a5a); }
+.history-clear {
+  width: 100%;
+  margin-top: var(--sp-3);
+  justify-content: center;
+}
