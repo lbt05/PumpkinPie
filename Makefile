@@ -85,11 +85,11 @@ web-build:
 
 .PHONY: run-master
 run-master:
-	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/pp master --http=:8080 --grpc=:7000 --db=./pp.db
+	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/pp master --config=pp-master.yaml
 
 .PHONY: run-agent
 run-agent:
-	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/pp agent --master=127.0.0.1:7000 --name=local-node
+	$(GO) run -ldflags "$(LDFLAGS)" ./cmd/pp agent --config=pp-agent.yaml
 
 .PHONY: clean
 clean:

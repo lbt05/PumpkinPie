@@ -15,7 +15,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -29,8 +28,11 @@ type Client struct {
 	apiVer string
 }
 
-func New() (*Client, error) {
-	sockPath := dockerSocketPath()
+// New creates a Docker Engine client targeting the unix socket at
+// sockPath. The socket resolution (config file vs. DOCKER_SOCK /
+// DOCKER_HOST env vars vs. built-in default) lives in cmd/agent so
+// this package stays free of os.Getenv calls and easy to test.
+func New(sockPath string) (*Client, error) {
 	c := &Client{host: "unix://" + sockPath, apiVer: "v1.43"}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -43,19 +45,6 @@ func New() (*Client, error) {
 	}
 	c.http = &http.Client{Transport: tr, Timeout: 5 * time.Minute}
 	return c, nil
-}
-
-func dockerSocketPath() string {
-	if v := os.Getenv("DOCKER_SOCK"); v != "" {
-		return v
-	}
-	if v := os.Getenv("DOCKER_HOST"); v != "" {
-		// support unix:///path
-		if strings.HasPrefix(v, "unix://") {
-			return strings.TrimPrefix(v, "unix://")
-		}
-	}
-	return "/var/run/docker.sock"
 }
 
 func (c *Client) Close() error { return nil }
@@ -382,11 +371,4 @@ func shortID(id string) string {
 		return id[:12]
 	}
 	return id
-}
-
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
 }

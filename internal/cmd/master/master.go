@@ -15,55 +15,63 @@ import (
 
 	"github.com/pumpkinpie/pumpkinpie/internal/master/agentmgr"
 	"github.com/pumpkinpie/pumpkinpie/internal/master/api"
+	"github.com/pumpkinpie/pumpkinpie/internal/master/config"
+	"github.com/pumpkinpie/pumpkinpie/internal/master/metrics"
 	"github.com/pumpkinpie/pumpkinpie/internal/master/proxy"
 	"github.com/pumpkinpie/pumpkinpie/internal/master/store"
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
 	"google.golang.org/grpc"
 )
 
-// Args holds the parsed flags for the master subcommand.
-type Args struct {
-	HTTP string
-	GRPC string
-	DB   string
-}
-
 // Run starts the master and blocks until ctx is cancelled or a fatal error
-// occurs. flags must be the FlagSet that already has --http/--grpc/--db
-// defined (typically flag.CommandLine after Parse).
+// occurs. The only knob exposed as a CLI flag is --config (which
+// defaults to config.DefaultPath); every other setting lives in
+// the YAML so a single file describes a deployment.
 func Run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("master", flag.ExitOnError)
-	a := Args{
-		HTTP: ":8080",
-		GRPC: ":7000",
-		DB:   "pumpkinpie.db",
-	}
-	fs.StringVar(&a.HTTP, "http", a.HTTP, "HTTP listen address (UI + REST API)")
-	fs.StringVar(&a.GRPC, "grpc", a.GRPC, "gRPC listen address (agents)")
-	fs.StringVar(&a.DB, "db", a.DB, "SQLite database path")
+	var configPath string
+	fs.StringVar(&configPath, "config", config.DefaultPath,
+		"path to the YAML configuration file (default /etc/pp/pp-master.yaml)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
-	st, err := store.Open(a.DB)
+	cfg, loaded, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	if loaded {
+		log.Printf("[master] loaded config from %s", configPath)
+	} else {
+		log.Printf("[master] no config file at %s, using built-in defaults (copy pp-master.yaml to customise)", configPath)
+	}
+
+	st, err := store.Open(cfg.DB)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	mgr := agentmgr.NewManager(st)
+	sink, err := metrics.NewSink(cfg.Greptime)
+	if err != nil {
+		return err
+	}
+	defer sink.Close()
+
+	mgr := agentmgr.NewManager(st, sink)
+	defer mgr.Shutdown()
 
 	// gRPC server for agents
-	grpcLn, err := net.Listen("tcp", a.GRPC)
+	grpcLn, err := net.Listen("tcp", cfg.GRPC)
 	if err != nil {
 		return err
 	}
 	gs := grpc.NewServer()
 	pb.RegisterAgentServiceServer(gs, agentmgr.NewGrpcServer(mgr))
 	go func() {
-		log.Printf("[master] gRPC server listening on %s", a.GRPC)
+		log.Printf("[master] gRPC server listening on %s", cfg.GRPC)
 		if err := gs.Serve(grpcLn); err != nil {
 			log.Printf("[master] grpc serve: %v", err)
 		}
@@ -80,12 +88,12 @@ func Run(ctx context.Context, args []string) error {
 	// HTTP API + frontend
 	apiSrv := api.New(ctx, st, mgr, px)
 	httpSrv := &http.Server{
-		Addr:              a.HTTP,
+		Addr:              cfg.HTTP,
 		Handler:           apiSrv.Engine(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {
-		log.Printf("[master] HTTP server listening on %s", a.HTTP)
+		log.Printf("[master] HTTP server listening on %s", cfg.HTTP)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("[master] http serve: %v", err)
 		}

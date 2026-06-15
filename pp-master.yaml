@@ -1,0 +1,37 @@
+# pumpkinPie master configuration.
+#
+# One file holds every knob the master exposes. Leave a field blank
+# (or omit it) to use the built-in default shown in the comment.
+#
+# Run with:
+#     pp master
+#     pp master --config=/path/to/this.yaml
+
+# HTTP listen address (UI + REST API). Default: ":8080"
+http: ":8080"
+
+# gRPC listen address (agents dial in here). Default: ":7000"
+grpc: ":7001"
+
+# SQLite database file. Default: "pumpkinpie.db"
+db: "pumpkinpie.db"
+
+# Optional: forward metrics to a GreptimeDB instance for long-term
+# analytics. Leave `url` blank (or omit the section) to keep all
+# metrics in SQLite only.
+#
+# See the README section "Forwarding metrics to GreptimeDB" for the
+# schema, query examples, and failure-mode notes.
+greptime:
+  # gRPC endpoint of GreptimeDB's frontend (port 4001 by default).
+  # Leave empty to disable the sink. Accepts "host:port" or
+  # "http(s)://host:port".
+  url: ""
+  # Logical database name. Default: "public"
+  database: "public"
+  # Destination table. Default: "node_metrics" (auto-created on
+  # first insert).
+  table: "node_metrics"
+  # Basic auth (GreptimeCloud sets these; standalone leaves blank).
+  # username: ""
+  # password: ""

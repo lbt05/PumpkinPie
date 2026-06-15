@@ -1,0 +1,38 @@
+# pumpkinPie agent configuration.
+#
+# One file holds every knob the agent exposes. Leave a field blank
+# (or omit it) to use the built-in default shown in the comment.
+#
+# Run with:
+#     pp agent
+#     pp agent --config=/path/to/this.yaml
+
+# gRPC address of the master to register with. Format: "host:port".
+# Default: "pp-master.internal:7000" — override to your master's
+# actual address, e.g. "10.0.0.1:7000".
+master: "0.0.0.0:7001"
+
+# Human-readable node name shown in the dashboard. Empty (default)
+# means the agent uses os.Hostname() at startup.
+name: ""
+
+# Directory for persistent agent state (the machine-id file lives
+# here so renaming the host or restarting the agent does not
+# register as a new node on the master). Leave empty (default) for
+# the platform-appropriate path:
+#   /var/lib/pp-agent            on Linux (systemd unit)
+#   $XDG_STATE_HOME/pumpkinpie   on Linux/macOS without systemd
+#   ~/.local/state/pumpkinpie    fallback
+#
+# Set explicitly for non-standard layouts, e.g. when running the
+# agent under a dedicated service user or in a container.
+state_dir: ""
+
+# Path to the Docker daemon unix socket. Empty (default) means:
+#   /var/run/docker.sock  on Linux (standard)
+# Override for rootless Docker, Docker Desktop, or remote setups:
+#   /run/user/1000/docker.sock   (rootless)
+#   $HOME/.docker/run/docker.sock  (Docker Desktop on macOS)
+# Env-var fallback still works for ad-hoc runs: DOCKER_SOCK=/path
+# ./bin/pp agent --config=...
+docker_sock: ""

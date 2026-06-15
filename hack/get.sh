@@ -8,20 +8,27 @@
 # Flags (after the role):
 #   --version <vX.Y.Z>       pin a release (default: latest)
 #   --prerelease             include pre-releases when resolving "latest"
-#   --data-dir <path>        master: SQLite + state dir       (default: /var/lib/pp)
-#   --state-dir <path>       agent: machine-id persistence    (default: /var/lib/pp-agent)
-#   --bin <path>             where to install the binary      (default: /usr/local/bin/pp)
-#   --http <addr>            master: HTTP listen addr         (default: 0.0.0.0:8080)
-#   --grpc <addr>            master: gRPC listen addr         (default: 0.0.0.0:7000)
-#   --master-ip <host:port>  agent: master address to dial    (default: pp-master.internal:7000)
-#   --name <hostname>        agent: node name                 (default: %H)
+#   --config <path>          master: path to pp-master.yaml      (default: /etc/pp/pp-master.yaml)
+#   --agent-config <path>    agent: path to pp-agent.yaml       (default: /etc/pp/pp-agent.yaml)
+#   --data-dir <path>        master: SQLite + state dir         (default: /var/lib/pp)
+#   --state-dir <path>       agent: machine-id persistence      (default: /var/lib/pp-agent)
+#   --bin <path>             where to install the binary        (default: /usr/local/bin/pp)
+#   --master-ip <host:port>  agent: master address to dial      (default: pp-master.internal:7000)
+#   --name <hostname>        agent: node name                   (default: %H)
 #   --no-systemd             install binary only, skip unit
 #   --dry-run                show what would happen, don't install
 #   -h, --help               this help
 #
 # Environment overrides (same names, no leading --):
-#   PP_VERSION, PP_BIN, PP_DATA_DIR, PP_STATE_DIR, PP_HTTP, PP_GRPC,
-#   PP_MASTER_ADDR, PP_NAME, PP_NO_SYSTEMD, PP_PRERELEASE
+#   PP_VERSION, PP_BIN, PP_CONFIG, PP_AGENT_CONFIG, PP_DATA_DIR,
+#   PP_STATE_DIR, PP_MASTER_ADDR, PP_NAME, PP_NO_SYSTEMD, PP_PRERELEASE
+#
+# Runtime configuration lives entirely in the YAML files at
+# $PP_CONFIG (master) and $PP_AGENT_CONFIG (agent). The agent flags
+# --master-ip / --name here are installer-time helpers — get.sh
+# writes them into the freshly-generated pp-agent.yaml so the agent
+# can start without the operator having to edit the YAML first.
+# The pp binary itself takes only --config=<path> on either role.
 #
 # Reference implementation only — keep this file POSIX-ish bash.
 # Tested on: Ubuntu 20.04+, Debian 11+, RHEL 9+, Amazon Linux 2023,
@@ -37,10 +44,10 @@ PROJECT_NAME="${PROJECT_NAME:-pumpkinpie}"
 ROLE=""
 VERSION=""
 PP_BIN="${PP_BIN:-/usr/local/bin/pp}"
+PP_CONFIG="${PP_CONFIG:-/etc/pp/pp-master.yaml}"
+PP_AGENT_CONFIG="${PP_AGENT_CONFIG:-/etc/pp/pp-agent.yaml}"
 PP_DATA_DIR="${PP_DATA_DIR:-/var/lib/pp}"
 PP_STATE_DIR="${PP_STATE_DIR:-/var/lib/pp-agent}"
-PP_HTTP="${PP_HTTP:-0.0.0.0:8080}"
-PP_GRPC="${PP_GRPC:-0.0.0.0:7000}"
 PP_MASTER_ADDR="${PP_MASTER_ADDR:-pp-master.internal:7000}"
 PP_NAME="${PP_NAME:-}"
 PP_NO_SYSTEMD="${PP_NO_SYSTEMD:-}"
@@ -63,20 +70,28 @@ Usage:
 Flags (after the role):
   --version <vX.Y.Z>       pin a release (default: latest)
   --prerelease             include pre-releases when resolving "latest"
-  --data-dir <path>        master: SQLite + state dir       (default: /var/lib/pp)
-  --state-dir <path>       agent: machine-id persistence    (default: /var/lib/pp-agent)
-  --bin <path>             where to install the binary      (default: /usr/local/bin/pp)
-  --http <addr>            master: HTTP listen addr         (default: 0.0.0.0:8080)
-  --grpc <addr>            master: gRPC listen addr         (default: 0.0.0.0:7000)
-  --master-ip <host:port>  agent: master address to dial    (default: pp-master.internal:7000)
-  --name <hostname>        agent: node name                 (default: %H)
+  --config <path>          master: path to pp-master.yaml      (default: /etc/pp/pp-master.yaml)
+  --agent-config <path>    agent: path to pp-agent.yaml       (default: /etc/pp/pp-agent.yaml)
+  --data-dir <path>        master: SQLite + state dir         (default: /var/lib/pp)
+  --state-dir <path>       agent: machine-id persistence      (default: /var/lib/pp-agent)
+  --bin <path>             where to install the binary        (default: /usr/local/bin/pp)
+  --master-ip <host:port>  agent: master address to dial      (default: pp-master.internal:7000)
+  --name <hostname>        agent: node name                   (default: %H)
   --no-systemd             install binary only, skip unit
   --dry-run                show what would happen, don't install
   -h, --help               this help
 
 Environment overrides (same names, no leading --):
-  PP_VERSION, PP_BIN, PP_DATA_DIR, PP_STATE_DIR, PP_HTTP, PP_GRPC,
-  PP_MASTER_ADDR, PP_NAME, PP_NO_SYSTEMD, PP_PRERELEASE
+  PP_VERSION, PP_BIN, PP_CONFIG, PP_AGENT_CONFIG, PP_DATA_DIR,
+  PP_STATE_DIR, PP_MASTER_ADDR, PP_NAME, PP_NO_SYSTEMD, PP_PRERELEASE
+
+Configuration:
+  Every master and agent setting lives in a YAML file. After install:
+    master: edit /etc/pp/pp-master.yaml then `systemctl restart pp-master`
+    agent:  edit /etc/pp/pp-agent.yaml then `systemctl restart pp-agent`
+  The pp binary itself takes only --config=<path> on either role;
+  the agent flags here (--master-ip, --name) are installer-time
+  helpers — get.sh writes them into the freshly-generated YAML.
 EOF
 }
 
@@ -87,10 +102,10 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     --version)      VERSION="$2"; shift 2 ;;
     --bin)          PP_BIN="$2"; shift 2 ;;
+    --config)       PP_CONFIG="$2"; shift 2 ;;
+    --agent-config) PP_AGENT_CONFIG="$2"; shift 2 ;;
     --data-dir)     PP_DATA_DIR="$2"; shift 2 ;;
     --state-dir)    PP_STATE_DIR="$2"; shift 2 ;;
-    --http)         PP_HTTP="$2"; shift 2 ;;
-    --grpc)         PP_GRPC="$2"; shift 2 ;;
     --master-ip)    PP_MASTER_ADDR="$2"; shift 2 ;;
     --name)         PP_NAME="$2"; shift 2 ;;
     --no-systemd)   PP_NO_SYSTEMD=1; shift ;;
@@ -274,29 +289,95 @@ if [[ "$OS" == "linux" && "$PP_NO_SYSTEMD" != "1" ]]; then
       useradd --system --home "$PP_DATA_DIR" --shell /usr/sbin/nologin pp
     fi
     install -d -m 0755 -o pp -g pp "$PP_DATA_DIR"
+
+    # Drop a default pp-master.yaml if one isn't there yet. Operators
+    # edit it to change listen addresses, the SQLite path, or to
+    # enable the GreptimeDB metrics sink.
+    PP_CONFIG_DIR="$(dirname "$PP_CONFIG")"
+    install -d -m 0755 "$PP_CONFIG_DIR"
+    if [[ ! -f "$PP_CONFIG" ]]; then
+      SAMPLE=""
+      for candidate in \
+        "$TMP/pp-master.yaml" \
+        "./pp-master.yaml" \
+        "/usr/local/share/pumpkinpie/pp-master.yaml"; do
+        if [[ -f "$candidate" ]]; then SAMPLE="$candidate"; break; fi
+      done
+      if [[ -n "$SAMPLE" ]]; then
+        install -m 0644 "$SAMPLE" "$PP_CONFIG"
+      else
+        # Last-resort inline default. Kept in sync with pp-master.yaml
+        # in the repo so the binary works out-of-the-box even when the
+        # sample file is missing (older tarballs).
+        cat > "$PP_CONFIG" <<'YAML'
+# pumpkinPie master configuration.
+# See README for the full schema and examples.
+http: ":8080"
+grpc: ":7000"
+db: "/var/lib/pp/pp.db"
+# Optional: forward metrics to GreptimeDB (leave url empty to disable).
+greptime:
+  url: ""
+  database: "public"
+  table: "node_metrics"
+YAML
+      fi
+      log "wrote default config to $PP_CONFIG (edit then restart pp-master)"
+    fi
   else
     install -d -m 0700 "$PP_STATE_DIR"
+
+    # Drop a default pp-agent.yaml if one isn't there yet. Operators
+    # edit it to change the master address, node name, state dir, or
+    # the Docker socket path.
+    PP_AGENT_CONFIG_DIR="$(dirname "$PP_AGENT_CONFIG")"
+    install -d -m 0755 "$PP_AGENT_CONFIG_DIR"
+    if [[ ! -f "$PP_AGENT_CONFIG" ]]; then
+      SAMPLE=""
+      for candidate in \
+        "$TMP/pp-agent.yaml" \
+        "./pp-agent.yaml" \
+        "/usr/local/share/pumpkinpie/pp-agent.yaml"; do
+        if [[ -f "$candidate" ]]; then SAMPLE="$candidate"; break; fi
+      done
+      if [[ -n "$SAMPLE" ]]; then
+        install -m 0644 "$SAMPLE" "$PP_AGENT_CONFIG"
+      else
+        # Last-resort inline default. Kept in sync with pp-agent.yaml
+        # in the repo so the binary works out-of-the-box even when the
+        # sample file is missing (older tarballs). The PP_MASTER_ADDR /
+        # PP_NAME / PP_STATE_DIR values are baked in so the agent has
+        # something sensible to dial before the operator edits the
+        # YAML.
+        cat > "$PP_AGENT_CONFIG" <<YAML
+# pumpkinPie agent configuration.
+# See README for the full schema and examples.
+master: "$PP_MASTER_ADDR"
+name: "$PP_NAME"
+state_dir: "$PP_STATE_DIR"
+docker_sock: "/var/run/docker.sock"
+YAML
+      fi
+      log "wrote default config to $PP_AGENT_CONFIG (edit then restart pp-agent)"
+    fi
   fi
 
   # Render via the shared helper so the unit text is always identical
   # to what contrib/systemd/install.sh would produce.
-  export PP_BIN PP_DATA_DIR PP_STATE_DIR PP_MASTER_ADDR PP_NAME
-  export PP_HTTP PP_GRPC
+  export PP_BIN PP_CONFIG PP_AGENT_CONFIG PP_DATA_DIR PP_STATE_DIR PP_MASTER_ADDR PP_NAME
   if [[ -x "$TMP/render-unit.sh" ]]; then
     "$TMP/render-unit.sh" "$ROLE" "$UNIT_TPL" > "$UNIT_DIR/$SERVICE_NAME"
   else
     # Fallback: inline render (kept in sync with hack/render-unit.sh).
     if [[ "$ROLE" == "master" ]]; then
       sed -e "s|/usr/local/bin/pp|$PP_BIN|g" \
+          -e "s|/etc/pp/pp-master.yaml|$PP_CONFIG|g" \
           -e "s|/var/lib/pp|$PP_DATA_DIR|g" \
-          -e "s|--http=0.0.0.0:8080|--http=$PP_HTTP|g" \
-          -e "s|--grpc=0.0.0.0:7000|--grpc=$PP_GRPC|g" \
           "$UNIT_TPL" > "$UNIT_DIR/$SERVICE_NAME"
     else
       sed -e "s|/usr/local/bin/pp|$PP_BIN|g" \
-          -e "s|--state-dir=/var/lib/pp-agent|--state-dir=$PP_STATE_DIR|g" \
-          -e "s|--master=pp-master.internal:7000|--master=$PP_MASTER_ADDR|g" \
-          -e "s|--name=%H|--name=$PP_NAME|g" \
+          -e "s|/etc/pp/pp-agent.yaml|$PP_AGENT_CONFIG|g" \
+          -e "s|/var/lib/pp-agent|$PP_STATE_DIR|g" \
           "$UNIT_TPL" > "$UNIT_DIR/$SERVICE_NAME"
     fi
   fi
@@ -310,18 +391,18 @@ if [[ "$OS" == "linux" && "$PP_NO_SYSTEMD" != "1" ]]; then
   printf '    systemctl status %s\n' "$SERVICE_NAME"
   printf '    journalctl -u %s -f\n'    "$SERVICE_NAME"
   if [[ "$ROLE" == "master" ]]; then
-    printf '    open http://%s/console/\n' "${PP_HTTP##*:}"
+    printf '    edit %s then: sudo systemctl restart %s\n' "$PP_CONFIG" "$SERVICE_NAME"
+    printf '    open the dashboard: see the `http:` value in %s\n' "$PP_CONFIG"
   else
+    printf '    edit %s then: sudo systemctl restart %s\n' "$PP_AGENT_CONFIG" "$SERVICE_NAME"
     printf '    add this agent on the master via the Nodes page\n'
   fi
 elif [[ "$OS" == "darwin" ]]; then
   log "macOS does not have systemd. Run manually:"
   if [[ "$ROLE" == "master" ]]; then
-    printf '    %s master --http=%s --grpc=%s --db=%s/pp.db\n' \
-      "$PP_BIN" "$PP_HTTP" "$PP_GRPC" "$PP_DATA_DIR"
+    printf '    edit %s then: %s master --config=%s\n' "$PP_CONFIG" "$PP_BIN" "$PP_CONFIG"
   else
-    printf '    %s agent --master=%s --name=<unique>\n' \
-      "$PP_BIN" "$PP_MASTER_ADDR"
+    printf '    edit %s then: %s agent --config=%s\n' "$PP_AGENT_CONFIG" "$PP_BIN" "$PP_AGENT_CONFIG"
   fi
 fi
 

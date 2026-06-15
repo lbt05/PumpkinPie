@@ -31,8 +31,12 @@ type Agent struct {
 	stream   pb.AgentService_ConnectClient
 }
 
-func New(masterAddr, nodeName, machineID string) (*Agent, error) {
-	dc, err := docker.New()
+// New wires up the gRPC client, Docker client and metrics collector.
+// dockerSock is the resolved unix socket path; cmd/agent handles the
+// YAML / DOCKER_SOCK / DOCKER_HOST / default precedence before
+// passing the result in.
+func New(masterAddr, nodeName, machineID, dockerSock string) (*Agent, error) {
+	dc, err := docker.New(dockerSock)
 	if err != nil {
 		return nil, fmt.Errorf("docker client: %w", err)
 	}

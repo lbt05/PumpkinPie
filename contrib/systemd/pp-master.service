@@ -8,11 +8,9 @@ Wants=network-online.target
 Type=simple
 User=pp
 Group=pp
-# Adjust ExecStart flags to your environment. See `pp master -h` for all options.
-ExecStart=/usr/local/bin/pp master \
-  --http=0.0.0.0:8080 \
-  --grpc=0.0.0.0:7000 \
-  --db=/var/lib/pp/pp.db
+# Adjust the YAML config to your environment; every knob (listen
+# addresses, SQLite path, optional GreptimeDB sink) lives there.
+ExecStart=/usr/local/bin/pp master --config=/etc/pp/pp-master.yaml
 WorkingDirectory=/var/lib/pp
 
 # Hardening: drop privileges and isolate the process as much as possible

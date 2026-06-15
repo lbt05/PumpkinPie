@@ -10,13 +10,9 @@ Type=simple
 User=root
 Group=root
 # The agent must run as root (or a user in the docker group) to access
-# the Docker socket. Change the socket path with DOCKER_SOCK=... if needed.
-Environment=DOCKER_SOCK=/var/run/docker.sock
-# Override the node name to something unique per host, e.g. via hostnamectl.
-ExecStart=/usr/local/bin/pp agent \
-  --master=pp-master.internal:7000 \
-  --name=%H \
-  --state-dir=/var/lib/pp-agent
+# the Docker socket. Adjust the YAML to your environment; every knob
+# (master address, node name, state dir, docker socket) lives there.
+ExecStart=/usr/local/bin/pp agent --config=/etc/pp/pp-agent.yaml
 WorkingDirectory=/var/lib/pp-agent
 # systemd creates /var/lib/pp-agent owned by this unit's user on first
 # start; the agent persists its machine-id there so renaming or

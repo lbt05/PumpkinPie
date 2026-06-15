@@ -7,12 +7,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
 
 	"google.golang.org/grpc/peer"
 
+	"github.com/pumpkinpie/pumpkinpie/internal/master/metrics"
 	"github.com/pumpkinpie/pumpkinpie/internal/master/store"
 	pb "github.com/pumpkinpie/pumpkinpie/proto/gen"
 )
@@ -20,9 +22,19 @@ import (
 // Manager tracks all connected agents and routes outbound messages to them.
 type Manager struct {
 	store    *store.Store
+	sink     metrics.Sink
 	mu       sync.RWMutex
 	sessions map[string]*Session // keyed by nodeID
 	updates  chan NodeUpdate     // broadcast channel for subscribers
+	// metrics fanout: handleMetrics pushes Metric values here, a
+	// single worker drains and writes them to the sink. Buffered so
+	// the gRPC handler loop never blocks on slow downstream sinks;
+	// on overflow we drop (with a debug log) rather than backpressure
+	// the agent — the SQLite snapshot is already authoritative.
+	sinkCh   chan metrics.Metric
+	sinkCtx  context.Context
+	sinkStop context.CancelFunc
+	sinkWG   sync.WaitGroup
 }
 
 type NodeUpdate struct {
@@ -33,11 +45,62 @@ type NodeUpdate struct {
 	Snapshot *store.Node
 }
 
-func NewManager(s *store.Store) *Manager {
-	return &Manager{
+func NewManager(s *store.Store, sink metrics.Sink) *Manager {
+	if sink == nil {
+		sink = metrics.NoopSink{}
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	m := &Manager{
 		store:    s,
+		sink:     sink,
 		sessions: make(map[string]*Session),
 		updates:  make(chan NodeUpdate, 256),
+		sinkCh:   make(chan metrics.Metric, 1024),
+		sinkCtx:  ctx,
+		sinkStop: stop,
+	}
+	m.sinkWG.Add(1)
+	go m.sinkLoop()
+	return m
+}
+
+// Shutdown stops the metrics sink worker and closes the underlying
+// sink. Safe to call multiple times; subsequent calls are no-ops.
+func (m *Manager) Shutdown() {
+	m.sinkStop()
+	m.sinkWG.Wait()
+	_ = m.sink.Close()
+}
+
+// sinkLoop drains the sink channel and forwards each Metric to the
+// sink. It serializes writes through a per-call timeout so a stuck
+// downstream (e.g. GreptimeDB hung on a slow DNS lookup) can't pin
+// the worker forever.
+func (m *Manager) sinkLoop() {
+	defer m.sinkWG.Done()
+	for {
+		select {
+		case <-m.sinkCtx.Done():
+			return
+		case metric := <-m.sinkCh:
+			ctx, cancel := context.WithTimeout(m.sinkCtx, 5*time.Second)
+			if err := m.sink.Write(ctx, metric); err != nil {
+				log.Printf("[metrics] write node=%s: %v", metric.NodeID, err)
+			}
+			cancel()
+		}
+	}
+}
+
+// enqueueMetric is a non-blocking send into the sink channel. Drops
+// the metric silently if the channel is full — the SQLite snapshot
+// already reflects the report, so a GreptimeDB outage that pauses
+// ingestion never produces an unbounded backlog in the master.
+func (m *Manager) enqueueMetric(metric metrics.Metric) {
+	select {
+	case m.sinkCh <- metric:
+	default:
+		log.Printf("[metrics] sink channel full, dropping metric for node=%s", metric.NodeID)
 	}
 }
 
@@ -62,7 +125,7 @@ func (m *Manager) OnAgentConnect(ctx context.Context, stream pb.AgentService_Con
 		return nil, "", err
 	}
 
-	sess := newSession(nodeID, stream, remoteHostFromContext(ctx))
+	sess := newSession(nodeID, reg.Name, stream, remoteHostFromContext(ctx))
 	m.mu.Lock()
 	if old, ok := m.sessions[nodeID]; ok {
 		old.close("superseded by new connection")
@@ -226,6 +289,10 @@ func (m *Manager) publish(u NodeUpdate) {
 
 type Session struct {
 	NodeID string
+	// nodeName is the human-readable name the agent registered with,
+	// captured at connect time so handleMetrics can tag sink writes
+	// without an extra DB lookup per report.
+	nodeName string
 	// remoteHost is the IP / hostname the agent's gRPC connection
 	// came from, used by the proxy to dial back to the agent's
 	// published container ports. Captured at OnAgentConnect from
@@ -237,9 +304,10 @@ type Session struct {
 	once       sync.Once
 }
 
-func newSession(nodeID string, stream pb.AgentService_ConnectServer, remoteHost string) *Session {
+func newSession(nodeID, nodeName string, stream pb.AgentService_ConnectServer, remoteHost string) *Session {
 	return &Session{
 		NodeID:     nodeID,
+		nodeName:   nodeName,
 		remoteHost: remoteHost,
 		stream:     stream,
 		closed:     make(chan struct{}),
@@ -297,6 +365,49 @@ func (s *Session) handleMetrics(ctx context.Context, mgr *Manager, r *pb.MetricR
 	if err := mgr.store.UpdateNodeMetrics(ctx, n); err == nil {
 		mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "metrics", At: time.Now(), Snapshot: n})
 	}
+	// Forward to the configured metrics sink (NoopSink when no
+	// backend is configured). Done out-of-band via enqueueMetric so
+	// a slow sink can't stall the gRPC receive loop.
+	ts := time.UnixMilli(r.TsUnixMs)
+	mgr.enqueueMetric(metricFromReport(s.NodeID, s.nodeName, n, r, ts))
+}
+
+// metricFromReport builds the sink-facing projection from the live
+// MetricReport + the Node we just persisted. Kept as a free function
+// so the metrics package never has to import agentmgr (and vice versa
+// stays a one-way dependency).
+func metricFromReport(nodeID, nodeName string, n *store.Node, r *pb.MetricReport, ts time.Time) metrics.Metric {
+	m := metrics.Metric{
+		NodeID:        nodeID,
+		NodeName:      nodeName,
+		CPUPercent:    n.CPUPercent,
+		CPUCores:      n.CPUCores,
+		MemUsedBytes:  n.MemUsedBytes,
+		MemTotalBytes: n.MemTotalBytes,
+		Load1:         n.Load1,
+		GpuCount:      n.GpuCount,
+		GpuUsageAvg:   n.GpuUsageAvg,
+		GpuMemUsed:    n.GpuMemUsed,
+		GpuMemTotal:   n.GpuMemTotal,
+		Disks:         metrics.DecodeDisks(n.DiskJSON),
+		TS:            ts,
+	}
+	if r != nil && r.Gpu != nil {
+		for _, d := range r.Gpu.Devices {
+			m.GpuDevices = append(m.GpuDevices, metrics.GPUSample{
+				Index:         d.Index,
+				Name:          d.Name,
+				UUID:          d.Uuid,
+				UsagePercent:  d.UsagePercent,
+				MemUsedBytes:  d.MemUsedBytes,
+				MemTotalBytes: d.MemTotalBytes,
+			})
+		}
+	}
+	if m.TS.IsZero() {
+		m.TS = time.Now().UTC()
+	}
+	return m
 }
 
 func (s *Session) handleContainerCreated(ctx context.Context, mgr *Manager, c *pb.ContainerCreated) {

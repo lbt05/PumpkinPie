@@ -56,6 +56,15 @@ curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
   | sudo bash -s -- master
 ```
 
+The installer drops a default `/etc/pp/pp-master.yaml` (listen
+addresses, SQLite path, optional GreptimeDB metrics sink). Edit it
+and restart `pp-master` to change any setting:
+
+```bash
+sudo $EDITOR /etc/pp/pp-master.yaml
+sudo systemctl restart pp-master
+```
+
 Open <http://localhost:8080/console/>. Status:
 
 ```bash
@@ -66,14 +75,18 @@ journalctl -u pp-master -f
 ### Agent (on every worker host)
 
 ```bash
-PP_MASTER_ADDR=master.example.com:7000 \
+PP_MASTER_ADDR=master.example.com:7000 PP_NAME=worker-1 \
   curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
   | sudo bash -s -- agent
 ```
 
-The agent needs Docker access and runs as `root` so it can talk to
-`/var/run/docker.sock`. Use `DOCKER_SOCK=...` (env var) or the
-`pp-docker-sock` argument if your socket lives elsewhere.
+`PP_MASTER_ADDR` / `PP_NAME` are installer-time helpers — get.sh
+writes them into the freshly-generated `/etc/pp/pp-agent.yaml`.
+After install, edit that YAML directly to change anything; the
+agent binary itself takes only `--config=<path>`. The agent also
+runs as `root` so it can talk to the Docker socket; set
+`docker_sock:` in the YAML (or `DOCKER_SOCK=` env var) for
+rootless / Docker Desktop / custom setups.
 
 ### Pinning a version
 
@@ -92,7 +105,7 @@ hand or wire it into your provisioning tool.
 ```bash
 curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
   | sudo bash -s -- master --no-systemd
-pp master --http=:8080 --grpc=:7000 --db=./pp.db
+pp master --config=./pp-master.yaml
 ```
 
 ## Build from source
@@ -165,12 +178,20 @@ resulting binary's version with `pp version`.
 
 ### 2. Start the Master
 
+Every master setting (listen addresses, SQLite path, optional
+GreptimeDB metrics sink) lives in a single YAML file. Copy the
+sample, edit it, and point the binary at it:
+
 ```bash
-./bin/pp master \
-  --http=:8080          # UI + REST API
-  --grpc=:7000          # gRPC for agents
-  --db=./pumpkinpie.db  # SQLite
+cp pp-master.yaml /etc/pp/pp-master.yaml   # or anywhere on disk
+$EDITOR /etc/pp/pp-master.yaml
+./bin/pp master --config=/etc/pp/pp-master.yaml
 ```
+
+If you skip `--config`, the master looks for `/etc/pp/pp-master.yaml`
+by default. If that file is missing too, it falls back to built-in
+defaults (`:8080` HTTP, `:7000` gRPC, `pumpkinpie.db` in the working
+directory, no GreptimeDB) — useful for local smoke tests.
 
 The master does not expose a single "proxy port" — every container
 created on the cluster gets its own dedicated port in the range
@@ -182,24 +203,38 @@ selector at the bottom of the sidebar to switch between **English** and
 
 ### 3. Start one or more Agents (on any machine with Docker)
 
-The agent discovers the Docker socket in this order:
-
-1. `$DOCKER_SOCK` — explicit override (highest priority)
-2. `$DOCKER_HOST` — standard Docker variable, only `unix://` prefix is recognized
-3. `/var/run/docker.sock` — hardcoded fallback (Linux default)
+Like the master, every agent setting (master gRPC address, node name,
+state directory, Docker socket) lives in a single YAML file:
 
 ```bash
-# Linux with standard Docker — no env var needed
-./bin/pp agent --master=master.example.com:7000 --name=node-A
+cp pp-agent.yaml /etc/pp/pp-agent.yaml   # or anywhere on disk
+$EDITOR /etc/pp/pp-agent.yaml             # set `master:` to your master
+./bin/pp agent --config=/etc/pp/pp-agent.yaml
+```
 
-# Linux with rootless Docker
-DOCKER_SOCK=$XDG_RUNTIME_DIR/docker.sock ./bin/pp agent --master=... --name=...
+If you skip `--config`, the agent looks for `/etc/pp/pp-agent.yaml`
+by default. If that's missing too, it falls back to built-in defaults
+(`pp-master.internal:7000`, name=hostname, platform-aware state_dir,
+`/var/run/docker.sock`) — useful for local smoke tests.
+
+Docker socket precedence (highest first):
+1. `docker_sock:` in the YAML
+2. `$DOCKER_SOCK` env var (legacy)
+3. `$DOCKER_HOST` env var, `unix://` prefix only
+4. `/var/run/docker.sock` (Linux built-in)
+
+```bash
+# Linux with standard Docker — no extra config needed
+./bin/pp agent --config=/etc/pp/pp-agent.yaml
+
+# Linux with rootless Docker — point the YAML's docker_sock at it
+docker_sock: "/run/user/1000/docker.sock"
 
 # macOS Docker Desktop
-DOCKER_SOCK=$HOME/.docker/run/docker.sock ./bin/pp agent --master=... --name=...
+docker_sock: "$HOME/.docker/run/docker.sock"
 
-# Remote Docker daemon
-DOCKER_HOST=tcp://docker-host:2375 ./bin/pp agent --master=... --name=...
+# Or override at runtime via env var (precedence #2 above)
+DOCKER_SOCK=$HOME/.docker/run/docker.sock ./bin/pp agent --config=...
 ```
 
 Within ~5 seconds the node cards should appear in the dashboard with live
@@ -210,13 +245,15 @@ metrics.
 `pp` is a single binary that runs as either role:
 
 ```
-pp master [flags]   # control plane: UI + API + gRPC + reverse proxy
-pp agent  [flags]   # node agent: registers to master, hosts containers
-pp version          # print version, commit, build time
-pp help             # print usage
+pp master [--config=path]   # control plane: UI + API + gRPC + reverse proxy
+pp agent  [--config=path]   # node agent: registers to master, hosts containers
+pp version                  # print version, commit, build time
+pp help                     # print usage
 ```
 
-Run `pp <subcommand> -h` to see flags for that subcommand.
+Both `master` and `agent` take a single `--config=<path>` flag (default
+`/etc/pp/pp-master.yaml` / `/etc/pp/pp-agent.yaml`). Every other
+setting lives in the YAML.
 
 ### 4. Create a container
 
@@ -344,6 +381,88 @@ Docker daemon on each GPU node.
 - **No memory-MB constraint** — you can't request "a GPU with ≥24 GB
   free". Reservations are purely by device count.
 
+## Forwarding metrics to GreptimeDB (optional)
+
+By default the master keeps the latest snapshot of every node's CPU /
+memory / disk / GPU / load metrics in SQLite and that's what the UI
+reads. For long-term analytics you can additionally forward each
+report to a [GreptimeDB](https://github.com/GreptimeTeam/greptimedb)
+instance over its gRPC frontend (port `4001` by default).
+
+The sink is **off by default** and the master starts and runs
+identically with or without it. To enable it, fill in the
+`greptime:` section of `pp-master.yaml`:
+
+```yaml
+greptime:
+  url: "greptime.internal:4001"
+  database: "public"
+  table: "node_metrics"
+  # username: "..."
+  # password: "..."
+```
+
+All `greptime:` fields:
+
+| Field | Default | Purpose |
+|---|---|---|
+| `url` | _empty_ (sink off) | gRPC endpoint of the GreptimeDB frontend. Accepts `host:port` or `http(s)://host:port`. |
+| `database` | `public` | Logical database to write into. |
+| `table` | `node_metrics` | Destination table. Auto-created on first insert. |
+| `username` / `password` | _empty_ | Basic auth (GreptimeCloud sets these; standalone leaves them blank). |
+
+### Schema
+
+A single wide table — `node_metrics` by default — with the agent's
+report fields as columns:
+
+- **Tags** (indexed, low-cardinality): `node_id`, `node_name`
+- **Fields** (scalars): `cpu_percent`, `cpu_cores`, `mem_used_bytes`,
+  `mem_total_bytes`, `load1`, `gpu_count`, `gpu_usage_percent`,
+  `gpu_mem_used_bytes`, `gpu_mem_total_bytes`
+- **Fields** (JSON): `disks` (`[]DiskSample`), `gpus` (`[]GPUSample`)
+- **Timestamp**: `ts` (TIMESTAMP_MILLISECOND)
+
+Query examples (MySQL/Postgres frontend):
+
+```sql
+-- 5-minute rolling average CPU per node, last hour
+SELECT node_id,
+       avg(cpu_percent) AS avg_cpu
+FROM   node_metrics
+WHERE  ts > NOW() - INTERVAL '1' HOUR
+GROUP  BY node_id, date_trunc('minute', ts)
+ORDER  BY ts;
+
+-- Top 10 disk-hungry nodes right now
+SELECT node_id,
+       json_extract_string(d, '$.path')    AS path,
+       json_extract_double(d, '$.usage_percent') AS pct
+FROM   node_metrics,
+       unnest(json_to_array(disks)) AS a(d)
+WHERE  ts > NOW() - INTERVAL '5' MINUTE
+ORDER  BY pct DESC
+LIMIT  10;
+```
+
+### Failure handling
+
+The sink fails soft: an unreachable or misconfigured GreptimeDB logs
+a warning at startup and every failed `Write` is logged at runtime,
+but the master's SQLite snapshot (and therefore the UI) is never
+affected. If the gRPC client fails to construct, the master logs the
+error once and returns the same error from every `Write` until it
+restarts — no retry loop, no exponential backoff, no unbounded
+backlog. The internal sink channel drops oldest metrics on overflow
+(the SQLite snapshot is still authoritative, so losing a sample for
+the analytics side is preferable to blocking the agent gRPC loop).
+
+### Persistence
+
+GreptimeDB keeps a full history of every metric; SQLite keeps only the
+latest. GreptimeDB is read by external tools (Grafana, ad-hoc SQL,
+the `gorm` driver, etc.); the dashboard UI still reads from SQLite.
+
 ## Architecture notes
 
 - **gRPC bidirectional stream** carries control traffic per agent —
@@ -407,8 +526,8 @@ It connects to the master outbound, so no inbound ports need to be
 opened on the worker firewall.
 
 If your Docker socket is not at `/var/run/docker.sock` (rootless Docker,
-macOS, custom path), edit the unit's `Environment=DOCKER_SOCK=...` line
-and `systemctl daemon-reload && systemctl restart pp-agent`.
+macOS, custom path), edit `docker_sock:` in `/etc/pp/pp-agent.yaml` and
+`sudo systemctl restart pp-agent`.
 
 ### 4. Day-to-day operations
 
@@ -484,6 +603,7 @@ pumpkinPie/
 │   │   ├── agentmgr/      # gRPC server, per-agent session, message dispatch
 │   │   ├── scheduler/     # idle-node selection (weighted score)
 │   │   ├── proxy/         # per-container TCP listener -> agent direct dial
+│   │   ├── metrics/       # optional GreptimeDB metrics sink (no-op when off)
 │   │   └── api/           # Gin HTTP handlers + WebSocket
 │   └── agent/
 │       ├── collector/     # CPU/mem/disk/GPU via gopsutil + nvidia-smi

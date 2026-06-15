@@ -4,8 +4,8 @@
 # install paths never drift on path substitution.
 #
 # Usage:
-#   PP_BIN=... PP_DATA_DIR=... PP_STATE_DIR=... PP_HTTP=... PP_GRPC=... \
-#     PP_MASTER_ADDR=... PP_NAME=... \
+#   PP_BIN=... PP_CONFIG=... PP_DATA_DIR=... PP_STATE_DIR=... \
+#     PP_AGENT_CONFIG=... PP_MASTER_ADDR=... \
 #     render-unit.sh <role> [<template-file>]
 #
 # Defaults match hack/get.sh and the existing contrib units.
@@ -22,12 +22,10 @@ TPL="${2:-}"
 }
 
 PP_BIN="${PP_BIN:-/usr/local/bin/pp}"
+PP_CONFIG="${PP_CONFIG:-/etc/pp/pp-master.yaml}"
+PP_AGENT_CONFIG="${PP_AGENT_CONFIG:-/etc/pp/pp-agent.yaml}"
 PP_DATA_DIR="${PP_DATA_DIR:-/var/lib/pp}"
 PP_STATE_DIR="${PP_STATE_DIR:-/var/lib/pp-agent}"
-PP_HTTP="${PP_HTTP:-0.0.0.0:8080}"
-PP_GRPC="${PP_GRPC:-0.0.0.0:7000}"
-PP_MASTER_ADDR="${PP_MASTER_ADDR:-pp-master.internal:7000}"
-PP_NAME="${PP_NAME:-%H}"
 
 # Resolve template path if not provided.
 if [[ -z "$TPL" ]]; then
@@ -44,14 +42,12 @@ fi
 
 if [[ "$ROLE" == "master" ]]; then
   sed -e "s|/usr/local/bin/pp|$PP_BIN|g" \
+      -e "s|/etc/pp/pp-master.yaml|$PP_CONFIG|g" \
       -e "s|/var/lib/pp|$PP_DATA_DIR|g" \
-      -e "s|--http=0.0.0.0:8080|--http=$PP_HTTP|g" \
-      -e "s|--grpc=0.0.0.0:7000|--grpc=$PP_GRPC|g" \
       "$TPL"
 else
   sed -e "s|/usr/local/bin/pp|$PP_BIN|g" \
-      -e "s|--state-dir=/var/lib/pp-agent|--state-dir=$PP_STATE_DIR|g" \
-      -e "s|--master=pp-master.internal:7000|--master=$PP_MASTER_ADDR|g" \
-      -e "s|--name=%H|--name=$PP_NAME|g" \
+      -e "s|/etc/pp/pp-agent.yaml|$PP_AGENT_CONFIG|g" \
+      -e "s|/var/lib/pp-agent|$PP_STATE_DIR|g" \
       "$TPL"
 fi
