@@ -74,7 +74,7 @@ function onThemeToggle() {
   <aside class="sidebar" aria-label="Primary">
     <RouterLink class="sidebar-brand" to="/" aria-label="pumpkinPie home">
       <span class="mark" aria-hidden="true">🎃</span>
-      <span class="word">pumpkin</span><span>Pie</span>
+      <span class="word">pumpkinPie</span>
     </RouterLink>
 
     <nav>
