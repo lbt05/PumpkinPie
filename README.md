@@ -108,6 +108,35 @@ curl -sSf https://raw.githubusercontent.com/lbt05/PumpkinPie/main/hack/get.sh \
 pp master --config=./pp-master.yaml
 ```
 
+### Manual install (offline / no GitHub access)
+
+If `api.github.com` or `github.com` is unreachable from the target
+host, you can still install from a tarball you sideloaded
+(sneakernet, internal mirror, internal release server, etc.):
+
+```bash
+# 1. On a machine with GitHub access, fetch the tarball
+curl -sSfL -o pumpkinpie_v0.1.0_linux_amd64.tar.gz \
+  https://github.com/lbt05/PumpkinPie/releases/download/v0.1.0/pumpkinpie_v0.1.0_linux_amd64.tar.gz
+
+# 2. Move it to the target host (scp, USB, whatever)
+
+# 3. On the target host, run the bundled installer
+sudo ./install-local.sh master ./pumpkinpie_v0.1.0_linux_amd64.tar.gz
+sudo ./install-local.sh agent  ./pumpkinpie_v0.1.0_linux_amd64.tar.gz \
+  --master-ip=10.0.0.1:7000 --name=worker-1
+```
+
+`install-local.sh` is included in every release tarball (alongside
+the canonical `install.sh` which downloads from GitHub). It does
+the same end-state as `get.sh` but every byte comes from the local
+file — no network access required after the tarball is on disk.
+
+Same flag surface as the GitHub installer, with one positional
+argument: the path to the tarball. See `./install-local.sh --help`
+on a host with the tarball unpacked, or `hack/install-local.sh
+--help` in the source repo.
+
 ## Build from source
 
 If you'd rather compile from source, or you need a custom patch:

@@ -157,6 +157,9 @@ func filterPartitions(parts []disk.PartitionStat) []disk.PartitionStat {
 // ignoredMountPrefixes are container/runtime/transient mounts whose disk
 // usage just mirrors something we already report (or is noise), so we
 // drop them to keep the per-node disk list small and meaningful.
+//
+// Each entry is matched as a path prefix with a "/" boundary
+// (so "/var/lib/docker" also catches "/var/lib/docker/overlay2/abc").
 var ignoredMountPrefixes = []string{
 	// container / orchestrator state — these live on the same disk as /
 	// and just inflate the partition list with one entry per container
@@ -180,14 +183,30 @@ var ignoredMountPrefixes = []string{
 	"/sys",
 	"/dev",
 
-	// macOS APFS metadata volumes that appear as separate mountpoints
-	// but carry no user-visible data worth tracking.
+	// macOS APFS sub-volumes that share the sealed-system container
+	// with /. On Big Sur+ these all report the same capacity because
+	// they live in one APFS container, but gopsutil emits distinct
+	// device strings for each (`/dev/disk3s1s1`, `/dev/disk3s5`, …)
+	// so our dedup-by-device can't merge them. Drop the firmlinks
+	// and let the canonical "/" entry represent the whole container.
+	// `/System/Volumes/Update/SFR/mnt1` is the sealed firmware
+	// partition on macOS 14+ (small read-only volume, ~5 GB) — kept
+	// here so the disk list collapses to just the user-data root.
 	"/System/Volumes/Preboot",
 	"/System/Volumes/Update",
+	"/System/Volumes/Update/SFR/mnt1",
 	"/System/Volumes/VM",
+	"/System/Volumes/Data",         // writable data layer (same container as /)
 	"/System/Volumes/xarts",
 	"/System/Volumes/Hardware",
 	"/System/Volumes/iSCPreboot",
+
+	// Nix package store. Multi-user Nix installs mount /nix on a
+	// dedicated partition on Linux, but the contents are mostly
+	// read-only package blobs that mirror what's already on the root
+	// disk. macOS users typically keep it on the system APFS
+	// container where it would otherwise double-count against /.
+	"/nix",
 }
 
 func isIgnoredMount(mp string) bool {

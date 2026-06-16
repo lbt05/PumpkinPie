@@ -43,10 +43,18 @@ func TestIsIgnoredMount(t *testing.T) {
 		{"/sys/fs/cgroup", true},
 		{"/dev/shm", true},
 
-		// macOS APFS metadata
+		// macOS APFS sub-volumes — all share the same container as /
+		// so the canonical "/" entry stands in for the whole disk.
 		{"/System/Volumes/Preboot", true},
 		{"/System/Volumes/VM/swapfile0", true},
-		{"/System/Volumes/Data", false}, // real user data — keep
+		{"/System/Volumes/Data", true}, // firmlink to / (same container)
+		{"/System/Volumes/Update/mnt1", true},
+		{"/System/Volumes/Update/SFR/mnt1", true}, // sealed firmware partition (macOS 14+)
+
+		// Nix package store
+		{"/nix", true},
+		{"/nix/store", true},
+		{"/nix/store/abc123-foo", true},
 
 		// false-positive guards (prefix without trailing slash must not match)
 		{"/runtime", false},

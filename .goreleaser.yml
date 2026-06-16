@@ -57,12 +57,23 @@ archives:
         dst: contrib/systemd/pp-master.service
       - src: contrib/systemd/pp-agent.service
         dst: contrib/systemd/pp-agent.service
+      # Sample YAML configs so hack/install-local.sh can copy them
+      # verbatim to /etc/pp/ on first install (single source of
+      # truth — no inline heredoc drift). Older tarballs that
+      # shipped without these still work; install-local.sh falls
+      # back to inline defaults.
+      - src: pp-master.yaml
+        dst: pp-master.yaml
+      - src: pp-agent.yaml
+        dst: pp-agent.yaml
       # Renamed in the archive so users always see the same path
       # regardless of the source layout.
       - src: hack/get.sh
         dst: install.sh
       - src: hack/render-unit.sh
         dst: render-unit.sh
+      - src: hack/install-local.sh
+        dst: install-local.sh
     # tar.gz is universally unpacked; zip is friendlier for Windows but
     # we don't ship that today. If you add windows, also add `formats: [zip]`.
 
