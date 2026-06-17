@@ -333,6 +333,8 @@ func (s *Session) handleIncoming(ctx context.Context, mgr *Manager, msg *pb.Agen
 		s.handleContainerStopped(ctx, mgr, p.ContainerStopped)
 	case *pb.AgentMessage_ContainerStarted:
 		s.handleContainerStarted(ctx, mgr, p.ContainerStarted)
+	case *pb.AgentMessage_ContainerStateChanged:
+		s.handleContainerStateChanged(ctx, mgr, p.ContainerStateChanged)
 	}
 }
 
@@ -442,6 +444,41 @@ func (s *Session) handleContainerStarted(ctx context.Context, mgr *Manager, c *p
 		state, status = "error", c.Error
 	}
 	_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, state, status)
+	mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "container", At: time.Now()})
+}
+
+// handleContainerStateChanged reconciles the master's stored row with
+// a lifecycle event the agent observed directly from Docker — either
+// via the /events stream or via the periodic /containers/json poll
+// fallback. Triggered by out-of-band changes the master didn't
+// initiate: user ran `docker stop` on the host, container OOM-killed,
+// daemon restart, `docker rm`, ...
+//
+// Idempotency: Docker replays the boundary event on agent reconnect,
+// and the periodic poll may push the same state twice. The state
+// vocabulary is monotonic for terminal transitions (stop/die/kill/
+// destroy all map to "exited"), and the agent's state-cache avoids
+// emitting duplicate "poll" updates — replays converge to the same
+// final state without an explicit event-id dedup table.
+//
+// Side effects on terminal transitions (action=destroy): we release
+// the GPU reservation the master held for this container. Without
+// this the GPU stays pinned until manual cleanup.
+func (s *Session) handleContainerStateChanged(ctx context.Context, mgr *Manager, c *pb.ContainerStateChanged) {
+	if c.ContainerId == "" || c.State == "" {
+		return
+	}
+	exists, err := mgr.store.ContainerExists(ctx, c.ContainerId)
+	if err != nil || !exists {
+		// Orphan event for a container the master never knew about
+		// (e.g. the user created it directly on the host with our
+		// label by accident). Ignore — we have no row to update.
+		return
+	}
+	_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, c.State, c.Status)
+	if c.Action == "destroy" {
+		_ = mgr.store.FreeGPUs(ctx, c.ContainerId)
+	}
 	mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "container", At: time.Now()})
 }
 

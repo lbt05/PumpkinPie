@@ -36,3 +36,26 @@ state_dir: ""
 # Env-var fallback still works for ad-hoc runs: DOCKER_SOCK=/path
 # ./bin/pp agent --config=...
 docker_sock: ""
+
+# How often the agent reconciles the master's view of each container
+# against Docker's true state. Runs alongside Docker's /events stream:
+# events gives sub-second updates when supported; this poll catches
+# everything events misses (Docker Desktop for Mac has long-standing
+# /events issues, some embedded container runtimes don't expose it
+# at all). On platforms where events work the poll is just a
+# drift-correction safety net.
+#
+# Go duration syntax. Default (empty): 10s. Set to "0s" to disable
+# polling entirely — only do this on platforms where you've verified
+# /events works, otherwise out-of-band `docker stop` on the agent
+# will leave the master showing the old state.
+container_poll_interval: ""
+
+# Whether to subscribe to Docker's /events stream for sub-second state
+# updates. Default: true. Set to false on platforms where /events
+# doesn't work (Docker Desktop for Mac historically closes the
+# long-poll connection immediately, which makes the agent retry
+# every second). When false, the polling loop above is the only
+# sync path — out-of-band `docker stop` shows up within one poll
+# interval (default 10s).
+docker_events: true

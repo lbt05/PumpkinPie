@@ -105,3 +105,39 @@ func TestLoad_MalformedYAMLErrors(t *testing.T) {
 		t.Fatal("expected parse error for malformed YAML")
 	}
 }
+
+// TestDockerEventsEnabled_DefaultsTrue locks in that omitting the
+// docker_events YAML key defaults to enabled. This matters because
+// the bool's zero value is false — using a non-pointer bool would
+// silently disable /events for every operator who didn't set the
+// key explicitly. The whole reason DockerEvents is a *bool is to
+// distinguish "unset" from explicit false.
+func TestDockerEventsEnabled_DefaultsTrue(t *testing.T) {
+	cfg := Config{}
+	if !cfg.DockerEventsEnabled() {
+		t.Fatal("unset docker_events must default to enabled")
+	}
+}
+
+// TestDockerEventsEnabled_ExplicitFalse exercises the Mac /
+// embedded-runtime opt-out path: `docker_events: false` in the YAML
+// must translate to a clean skip of the /events subscription while
+// leaving the polling loop untouched.
+func TestDockerEventsEnabled_ExplicitFalse(t *testing.T) {
+	f := false
+	cfg := Config{DockerEvents: &f}
+	if cfg.DockerEventsEnabled() {
+		t.Fatal(`docker_events: false must disable events`)
+	}
+}
+
+// TestDockerEventsEnabled_ExplicitTrue is the boring case but
+// guards against future refactors that accidentally flip the
+// pointer-nil check.
+func TestDockerEventsEnabled_ExplicitTrue(t *testing.T) {
+	tr := true
+	cfg := Config{DockerEvents: &tr}
+	if !cfg.DockerEventsEnabled() {
+		t.Fatal(`docker_events: true must keep events enabled`)
+	}
+}

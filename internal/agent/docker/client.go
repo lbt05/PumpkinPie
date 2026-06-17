@@ -265,6 +265,110 @@ func splitPortKey(k string) (int, string, bool) {
 	return n, k[idx+1:], true
 }
 
+// ---- Events ----
+
+// ContainerEvent is one lifecycle event from Docker's /events stream,
+// filtered server-side to pumpkinpie.managed=true containers. The
+// caller maps Action to the master's state vocabulary; the agent
+// itself only cares about the raw action + the master container_id
+// label so it can route the change to the right master-side row.
+type ContainerEvent struct {
+	ID         string            // docker container id
+	Action     string            // start / die / stop / kill / destroy / pause / unpause / restart
+	Time       time.Time         // when Docker recorded the event
+	Attributes map[string]string // labels — pumpkinpie.container_id is the master-assigned id
+}
+
+// Events opens a long-poll HTTP stream to /events and forwards each
+// container event onto the returned channel. The channel is closed
+// when ctx is cancelled or the underlying connection drops.
+//
+// `since` lets the caller resume after a disconnect: Docker replays
+// every event with time >= since, so the caller is responsible for
+// passing the timestamp of the last successfully delivered event and
+// deduping the overlap (the boundary event itself is replayed).
+//
+// Server-side filtering narrows the stream to containers labelled
+// with pumpkinpie.managed=true, so we don't burn CPU on every event
+// for unrelated containers running on the same host.
+//
+// NOTE: Docker's /events endpoint is unreliable on some platforms —
+// Docker Desktop for Mac closes the long-poll connection immediately,
+// and some embedded container runtimes don't implement it at all.
+// Callers should treat a stream that closes faster than expected as
+// a platform-level signal rather than a fatal error and run a polling
+// fallback in parallel.
+func (c *Client) Events(ctx context.Context, since time.Time) (<-chan ContainerEvent, error) {
+	filter, _ := json.Marshal(map[string]any{
+		"type":  "container",
+		"label": map[string]string{"pumpkinpie.managed": "true"},
+	})
+	path := "/events?filters=" + queryEscape(string(filter))
+	if !since.IsZero() {
+		path += "&since=" + strconv.FormatInt(since.Unix(), 10)
+	}
+	url := "http://localhost" + path
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("docker events: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		buf, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("docker %s %s -> %d: %s", "GET", path, resp.StatusCode, string(buf))
+	}
+
+	out := make(chan ContainerEvent, 16)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		dec := json.NewDecoder(resp.Body)
+		for {
+			var raw struct {
+				Status string `json:"status"`
+				ID     string `json:"id"`
+				Type   string `json:"Type"`
+				Action string `json:"Action"`
+				Time   int64  `json:"time"` // unix seconds
+				Actor  struct {
+					ID         string            `json:"ID"`
+					Attributes map[string]string `json:"Attributes"`
+				} `json:"Actor"`
+			}
+			if err := dec.Decode(&raw); err != nil {
+				if err != io.EOF {
+					log.Printf("docker events: decode: %v", err)
+				}
+				return
+			}
+			if raw.Type != "" && raw.Type != "container" {
+				continue
+			}
+			ev := ContainerEvent{
+				ID:         raw.Actor.ID,
+				Action:     raw.Action,
+				Attributes: raw.Actor.Attributes,
+			}
+			if raw.ID != "" && ev.ID == "" {
+				ev.ID = raw.ID
+			}
+			if raw.Time > 0 {
+				ev.Time = time.Unix(raw.Time, 0)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case out <- ev:
+			}
+		}
+	}()
+	return out, nil
+}
+
 // ListAgentContainers returns containers labeled with our agent:master_container_id
 func (c *Client) ListAgent(ctx context.Context) ([]*pb.ContainerInfo, error) {
 	filter, _ := json.Marshal(map[string]any{

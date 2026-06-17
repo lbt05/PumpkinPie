@@ -261,3 +261,153 @@ func (b *blockingSink) Write(ctx context.Context, _ metrics.Metric) error {
 	}
 }
 func (b *blockingSink) Close() error { return nil }
+
+// TestHandleContainerStateChanged_OutOfBandStop covers the original
+// bug report: the user runs `docker stop <id>` directly on the agent
+// host, Docker stops the container, and the master's stored state
+// must flip to "exited" without the master ever issuing the stop
+// itself. Prior to the events-stream + polling wiring, the master row
+// stayed stuck at "running" until the next agent reconnect.
+func TestHandleContainerStateChanged_OutOfBandStop(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+
+	nodeID, err := m.resolveNodeID(ctx, &pb.RegisterRequest{
+		Name: "n", Hostname: "h", MachineId: "machine-os-1",
+	})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if err := m.store.InsertContainer(ctx, &store.Container{
+		ID:       "c1",
+		NodeID:   nodeID,
+		DockerID: "deadbeef",
+		Image:    "nginx:latest",
+		State:    "running",
+		Status:   "running",
+	}); err != nil {
+		t.Fatalf("seed container: %v", err)
+	}
+
+	sess := newSession(nodeID, "n", nil, "")
+	sess.handleContainerStateChanged(ctx, m, &pb.ContainerStateChanged{
+		ContainerId: "c1",
+		DockerId:    "deadbeef",
+		Action:      "die",
+		State:       "exited",
+		Status:      "exited",
+		TsUnixMs:    time.Now().UnixMilli(),
+	})
+
+	got, err := m.store.GetContainer(ctx, "c1")
+	if err != nil {
+		t.Fatalf("get container: %v", err)
+	}
+	if got.State != "exited" || got.Status != "exited" {
+		t.Errorf("state=%q status=%q, want both \"exited\"", got.State, got.Status)
+	}
+}
+
+// TestHandleContainerStateChanged_PollActionAccepted locks in that
+// the same handler accepts the action="poll" variant emitted by
+// containerPollLoop on platforms where /events doesn't work. Without
+// this path, Docker Desktop for Mac users would never see out-of-band
+// `docker stop` reflected in the master.
+func TestHandleContainerStateChanged_PollActionAccepted(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+
+	nodeID, _ := m.resolveNodeID(ctx, &pb.RegisterRequest{
+		Name: "n", Hostname: "h", MachineId: "machine-poll-1",
+	})
+	_ = m.store.InsertContainer(ctx, &store.Container{
+		ID: "c1", NodeID: nodeID, DockerID: "deadbeef",
+		Image: "nginx:latest", State: "running", Status: "running",
+	})
+
+	sess := newSession(nodeID, "n", nil, "")
+	sess.handleContainerStateChanged(ctx, m, &pb.ContainerStateChanged{
+		ContainerId: "c1",
+		DockerId:    "deadbeef",
+		Action:      "poll",
+		State:       "exited",
+		Status:      "exited",
+	})
+
+	got, _ := m.store.GetContainer(ctx, "c1")
+	if got.State != "exited" {
+		t.Errorf("poll action should still update state, got %q", got.State)
+	}
+}
+
+// TestHandleContainerStateChanged_DestroyFreesGPUs checks the
+// terminal-transition side effect: when Docker destroys the
+// container (out-of-band `docker rm`), the master releases any
+// GPU reservation it still holds, otherwise the devices stay
+// pinned until manual cleanup.
+func TestHandleContainerStateChanged_DestroyFreesGPUs(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+
+	nodeID, _ := m.resolveNodeID(ctx, &pb.RegisterRequest{
+		Name: "n", Hostname: "h", MachineId: "machine-os-2",
+	})
+	_ = m.store.UpsertNode(ctx, &store.Node{
+		ID: nodeID, MachineID: "machine-os-2", Name: "n",
+		State: "online", GpuCount: 4,
+	})
+	if err := m.store.InsertContainer(ctx, &store.Container{
+		ID: "c1", NodeID: nodeID, DockerID: "deadbeef",
+		Image: "tf:latest", State: "running", Status: "running",
+	}); err != nil {
+		t.Fatalf("seed container: %v", err)
+	}
+	if _, err := m.store.AllocGPUs(ctx, nodeID, "c1", 2, 4); err != nil {
+		t.Fatalf("AllocGPUs: %v", err)
+	}
+
+	sess := newSession(nodeID, "n", nil, "")
+	sess.handleContainerStateChanged(ctx, m, &pb.ContainerStateChanged{
+		ContainerId: "c1",
+		DockerId:    "deadbeef",
+		Action:      "destroy",
+		State:       "exited",
+		Status:      "exited",
+	})
+
+	idx, err := m.store.GetContainerGPUs(ctx, "c1")
+	if err != nil {
+		t.Fatalf("GetContainerGPUs: %v", err)
+	}
+	if len(idx) != 0 {
+		t.Errorf("expected GPUs released after destroy, still hold %v", idx)
+	}
+}
+
+// TestHandleContainerStateChanged_OrphanIgnored ensures we don't
+// crash on an event for a container the master never knew about
+// (e.g. someone labelled a manual container with our prefix).
+func TestHandleContainerStateChanged_OrphanIgnored(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+
+	nodeID, _ := m.resolveNodeID(ctx, &pb.RegisterRequest{
+		Name: "n", Hostname: "h", MachineId: "machine-os-3",
+	})
+	sess := newSession(nodeID, "n", nil, "")
+
+	sess.handleContainerStateChanged(ctx, m, &pb.ContainerStateChanged{
+		ContainerId: "ghost",
+		Action:      "die",
+		State:       "exited",
+		Status:      "exited",
+	})
+
+	exists, err := m.store.ContainerExists(ctx, "ghost")
+	if err != nil {
+		t.Fatalf("ContainerExists: %v", err)
+	}
+	if exists {
+		t.Errorf("orphan event should not create a container row")
+	}
+}

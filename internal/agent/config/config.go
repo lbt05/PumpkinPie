@@ -48,6 +48,24 @@ type Config struct {
 	// applies env-var fallback (DOCKER_SOCK / DOCKER_HOST) on top of
 	// this value so ad-hoc CLI use still works.
 	DockerSock string `yaml:"docker_sock"`
+	// ContainerPollInterval is how often the agent reconciles the
+	// master's view of each container against Docker's true state by
+	// calling /containers/json. Runs alongside Docker's /events
+	// stream — events gives sub-second updates when supported, poll
+	// gives correctness on platforms where /events is broken
+	// (Docker Desktop for Mac, some embedded runtimes). Format is
+	// Go duration syntax ("10s", "1m"). Empty = built-in default
+	// (10s). "0s" disables polling, leaving events as the only path.
+	ContainerPollInterval string `yaml:"container_poll_interval"`
+	// DockerEvents controls whether the agent subscribes to Docker's
+	// /events stream. Pointer so we can distinguish "unset" (use the
+	// built-in default of true) from an explicit false — bool's zero
+	// value would force every existing config to opt out. Set to
+	// false on platforms where /events is broken (Docker Desktop for
+	// Mac historically closes the long-poll connection immediately)
+	// to skip the failing subscribe entirely; the polling fallback
+	// still reconciles state.
+	DockerEvents *bool `yaml:"docker_events"`
 }
 
 // defaults returns a Config populated with the same values the
@@ -97,11 +115,20 @@ func Load(path string) (Config, bool, error) {
 //     /var/lib/pp-agent here would make ./bin/pp agent unusable
 //     on macOS / non-root dev hosts where that path isn't writable.
 //   - DockerSock: empty tells the runner to fall through the
-//     env-var chain ($DOCKER_SOCK / $DOCKER_HOST) before defaulting
+//     env-var chain ($DOCKER_SOCK / DOCKER_HOST) before defaulting
 //     to /var/run/docker.sock. Filling it in would silently disable
 //     that fallback for partial YAMLs.
 func (c *Config) applyDefaults() {
 	if c.Master == "" {
 		c.Master = DefaultMaster
 	}
+}
+
+// DockerEventsEnabled returns the effective value of DockerEvents,
+// defaulting to true when the YAML left it unset.
+func (c *Config) DockerEventsEnabled() bool {
+	if c.DockerEvents == nil {
+		return true
+	}
+	return *c.DockerEvents
 }

@@ -21,12 +21,19 @@ service AgentService {
 message AgentMessage {
   reserved 10, 11;
   oneof payload {
-    RegisterRequest      register       = 1;
-    Heartbeat            heartbeat      = 2;
-    MetricReport         metrics        = 3;
-    ContainerCreated     container_created = 4;
-    ContainerStopped     container_stopped = 5;
-    ContainerStarted     container_started = 8;
+    RegisterRequest          register              = 1;
+    Heartbeat                heartbeat             = 2;
+    MetricReport             metrics               = 3;
+    ContainerCreated         container_created     = 4;
+    ContainerStopped         container_stopped     = 5;
+    ContainerStarted         container_started     = 8;
+    // Pushed by the agent when it observes a Docker lifecycle change
+    // either via /events (sub-second) or via periodic /containers/json
+    // polling (covers platforms where /events doesn't work — Docker
+    // Desktop for Mac, some embedded runtimes). Lets the master
+    // reconcile its stored state with Docker's truth for changes the
+    // master didn't initiate.
+    ContainerStateChanged    container_state_changed = 12;
   }
 }
 
@@ -174,6 +181,20 @@ message ContainerStopped {
   string            container_id    = 1;
   string            docker_id       = 2;
   string            error           = 3;
+}
+
+// Lifecycle change observed by the agent out-of-band. action mirrors
+// Docker's event action for /events-sourced changes (start/die/stop/
+// kill/destroy/pause/unpause/restart) or the literal "poll" when
+// driven by the periodic ListAgent fallback. The master maps state
+// onto its own state vocabulary so the UI/status code keeps working.
+message ContainerStateChanged {
+  string            container_id    = 1; // pumpkinpie.container_id label
+  string            docker_id       = 2;
+  string            action          = 3; // raw Docker event action or "poll"
+  string            state           = 4; // mapped state ("running"/"exited"/...)
+  string            status          = 5; // human-readable status text
+  int64             ts_unix_ms      = 6; // event timestamp (or now() for poll)
 }
 
 message ListContainersRequest {}

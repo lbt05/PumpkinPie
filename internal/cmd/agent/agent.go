@@ -89,7 +89,7 @@ func Run(ctx context.Context, args []string) error {
 		cancel()
 	}()
 
-	ag, err := agent.New(cfg.Master, name, machineID, sockPath)
+	ag, err := agent.New(cfg.Master, name, machineID, sockPath, cfg.ContainerPollInterval, cfg.DockerEventsEnabled())
 	if err != nil {
 		return err
 	}

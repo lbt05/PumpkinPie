@@ -307,6 +307,22 @@ func (s *Store) DeleteContainer(ctx context.Context, id string) error {
 	return err
 }
 
+// ContainerExists reports whether a row exists for the given master
+// container id. Cheaper than GetContainer for the common "is this a
+// known container?" check (e.g. before processing an unsolicited
+// lifecycle event from the agent).
+func (s *Store) ContainerExists(ctx context.Context, id string) (bool, error) {
+	var x int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM containers WHERE id=? LIMIT 1`, id).Scan(&x)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) ListContainers(ctx context.Context) ([]*Container, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, node_id, docker_id, name, image, state, status,
 		env_json, cmd_json, ports_json, volume_binds, cpu_cores, memory_bytes, gpu_count,
