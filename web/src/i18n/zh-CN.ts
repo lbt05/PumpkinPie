@@ -192,6 +192,10 @@ export default {
     stopConfirm: '停止容器 {name}?',
     noAction: '—',
     pollFooter: '所有破坏性操作均需确认。4 秒一次的轮询会与 Master 同步状态。',
+    copyImage: '复制镜像地址',
+    copyImageSuccess: '镜像地址已复制到剪贴板',
+    copyImageFailed: '复制镜像地址失败',
+    visitExternal: '点击在新窗口打开',
   },
   createContainer: {
     title: '新建容器',

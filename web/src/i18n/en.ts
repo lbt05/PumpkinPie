@@ -196,6 +196,10 @@ export default {
     stopConfirm: 'Stop container {name}?',
     noAction: '—',
     pollFooter: 'Destructive actions are confirmed. The 4 s polling reconciles state with the master.',
+    copyImage: 'Copy image address',
+    copyImageSuccess: 'Image address copied to clipboard',
+    copyImageFailed: 'Failed to copy image address',
+    visitExternal: 'Click to open in a new tab',
   },
   createContainer: {
     title: 'New Container',

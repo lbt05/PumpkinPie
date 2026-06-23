@@ -17,6 +17,16 @@ import {
   type Node,
 } from '@/api/client'
 
+function shortImageName(image: string): string {
+  if (!image) return ''
+  const atIdx = image.indexOf('@')
+  const base = atIdx >= 0 ? image.substring(0, atIdx) : image
+  const lastSlash = base.lastIndexOf('/')
+  const namePart = lastSlash >= 0 ? base.substring(lastSlash + 1) : base
+  const colon = namePart.lastIndexOf(':')
+  return colon >= 0 ? namePart.substring(0, colon) : namePart
+}
+
 const { t } = useI18n()
 const router = useRouter()
 
@@ -128,6 +138,27 @@ async function onDelete(c: Container) {
     ElMessage({ type: 'error', message: t('containers.deleteFailed', { msg: e?.response?.data?.error || e?.message }) })
   }
 }
+
+async function onCopyImage(image: string) {
+  if (!image) return
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(image)
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = image
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+    ElMessage({ type: 'success', message: t('containers.copyImageSuccess') })
+  } catch {
+    ElMessage({ type: 'error', message: t('containers.copyImageFailed') })
+  }
+}
 </script>
 
 <template>
@@ -191,7 +222,6 @@ async function onDelete(c: Container) {
             <th>{{ t('col.image') }}</th>
             <th>{{ t('col.node') }}</th>
             <th>{{ t('col.state') }}</th>
-            <th>{{ t('col.status') }}</th>
             <th>{{ t('col.resources') }}</th>
             <th>{{ t('col.external') }}</th>
             <th>{{ t('col.created') }}</th>
@@ -206,13 +236,37 @@ async function onDelete(c: Container) {
                 <template v-else>{{ c.name }}</template>
               </span>
             </td>
-            <td class="col-muted mono col-ellipsis" style="max-width:240px;" :title="c.image">{{ c.image }}</td>
+            <td class="col-image">
+              <span class="image-cell">
+                <el-tooltip :content="c.image" placement="top" :show-after="100">
+                  <span class="image-name mono">{{ shortImageName(c.image) }}</span>
+                </el-tooltip>
+                <el-tooltip :content="t('containers.copyImage')" placement="top">
+                  <button
+                    class="btn-icon copy-btn"
+                    type="button"
+                    :aria-label="t('containers.copyImage')"
+                    @click="onCopyImage(c.image)"
+                  >
+                    <span class="ico" aria-hidden="true">⧉</span>
+                  </button>
+                </el-tooltip>
+              </span>
+            </td>
             <td class="col-muted mono">{{ c.node_name || nodeName(c.node_id) }}</td>
             <td>
-              <span class="status-dot" :class="c.state" />
-              <span class="badge" :class="stateClass(c.state)" style="margin-left:6px;">{{ t('state.' + c.state, c.state) }}</span>
+              <el-tooltip
+                :content="c.status || ''"
+                placement="top"
+                :disabled="!c.status"
+                :show-after="100"
+              >
+                <span class="status-cell">
+                  <span class="status-dot" :class="c.state" />
+                  <span class="badge" :class="stateClass(c.state)" style="margin-left:6px;">{{ t('state.' + c.state, c.state) }}</span>
+                </span>
+              </el-tooltip>
             </td>
-            <td class="col-muted col-ellipsis" style="max-width:220px;" :title="c.status">{{ c.status || t('common.na') }}</td>
             <td>
               <span class="resource-tag">
                 <template v-for="(s, i) in resourcesLabel(c)" :key="i">
@@ -222,10 +276,22 @@ async function onDelete(c: Container) {
               </span>
             </td>
             <td class="col-muted">
-              <a v-if="c.external_url" :href="c.external_url" target="_blank" rel="noopener" class="visit-link" :title="c.external_url">
-                <span class="ext-ico" aria-hidden="true">↗</span>
-                {{ c.external_url }}
-              </a>
+              <el-tooltip
+                v-if="c.external_url"
+                :content="t('containers.visitExternal')"
+                placement="top"
+              >
+                <a
+                  :href="c.external_url"
+                  target="_blank"
+                  rel="noopener"
+                  class="visit-link"
+                  :title="c.external_url"
+                  :aria-label="t('containers.visitExternal')"
+                >
+                  <el-icon class="ext-ico"><TopRight /></el-icon>
+                </a>
+              </el-tooltip>
               <span v-else class="faint">{{ t('common.na') }}</span>
             </td>
             <td class="col-muted mono">{{ fmtDateTime(c.created_at) }}</td>
@@ -291,14 +357,68 @@ td.col-actions .row-actions { justify-content: flex-end; gap: 6px; }
 .col-name a .ext-ico { color: var(--text-faint); font-size: 11px; margin-left: 4px; vertical-align: middle; }
 .col-name a:hover .ext-ico { color: var(--accent); }
 
-.visit-link {
-  display: inline-flex; align-items: center; gap: 4px;
-  max-width: 200px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  vertical-align: middle;
+/* Image cell — short name + copy button. */
+.col-image { max-width: 280px; }
+.image-cell {
+  display: inline-flex; align-items: center; gap: 6px;
+  max-width: 100%;
 }
-.visit-link .ext-ico { color: var(--text-faint); font-size: 11px; }
-.visit-link:hover .ext-ico { color: var(--accent); }
+.image-name {
+  max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block;
+  vertical-align: middle;
+  cursor: default;
+}
+.copy-btn {
+  flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px;
+  padding: 0;
+  border-radius: var(--r-2);
+  border: 1px solid var(--border-soft);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast);
+}
+.copy-btn:hover {
+  color: var(--accent);
+  background: var(--bg-elev);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+.copy-btn:active { transform: translateY(1px); }
+.copy-btn .ico { font-size: 13px; line-height: 1; }
+
+/* Status cell — keeps dot + badge inline so the tooltip wraps the whole row. */
+.status-cell { display: inline-flex; align-items: center; cursor: default; }
+
+/* External link — clear, accent-tinted icon button so it reads as "click me". */
+.visit-link {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px;
+  border-radius: var(--r-3);
+  border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent);
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  color: var(--accent);
+  transition: color var(--t-fast), background var(--t-fast), border-color var(--t-fast),
+              transform var(--t-fast), box-shadow var(--t-fast);
+  text-decoration: none;
+}
+.visit-link:hover {
+  color: var(--accent-hover);
+  background: color-mix(in oklab, var(--accent) 20%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px color-mix(in oklab, var(--accent) 18%, transparent);
+  text-decoration: none;
+}
+.visit-link:active { transform: translateY(0); }
+.visit-link:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--accent) 60%, transparent);
+  outline-offset: 2px;
+}
+.visit-link .ext-ico { font-size: 18px; line-height: 1; }
 
 /* Toggle button — same shape, label switches by state. */
 .btn.is-toggle { min-width: 64px; justify-content: center; }
