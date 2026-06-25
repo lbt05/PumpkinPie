@@ -442,6 +442,12 @@ func (s *Session) handleContainerStarted(ctx context.Context, mgr *Manager, c *p
 	state, status := "running", "running"
 	if c.Error != "" {
 		state, status = "error", c.Error
+		// startContainer reserved the GPU before dispatching the start
+		// command. On agent-side failure (e.g. docker start rejected
+		// the device) the docker container is never running, so release
+		// the master's reservation immediately — we cannot wait for the
+		// events-stream die, the user may retry start before it lands.
+		_ = mgr.store.FreeGPUs(ctx, c.ContainerId)
 	}
 	_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, state, status)
 	mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "container", At: time.Now()})
@@ -461,9 +467,15 @@ func (s *Session) handleContainerStarted(ctx context.Context, mgr *Manager, c *p
 // emitting duplicate "poll" updates — replays converge to the same
 // final state without an explicit event-id dedup table.
 //
-// Side effects on terminal transitions (action=destroy): we release
-// the GPU reservation the master held for this container. Without
-// this the GPU stays pinned until manual cleanup.
+// Side effects on terminal transitions (action ∈ {die, stop, kill,
+// destroy}): we release the GPU reservation the master held for this
+// container. Without this, an OOM-killed or out-of-band `docker stop`
+// leaves the gpu_alloc row orphaned, blocking subsequent /start with
+// "requested GPU index is already allocated". The container can still
+// be restarted — start re-reserves the same indices — and
+// handleContainerStarted's error path handles the rare case where the
+// agent's start acks arrive before the corresponding events-stream
+// die.
 func (s *Session) handleContainerStateChanged(ctx context.Context, mgr *Manager, c *pb.ContainerStateChanged) {
 	if c.ContainerId == "" || c.State == "" {
 		return
@@ -476,10 +488,25 @@ func (s *Session) handleContainerStateChanged(ctx context.Context, mgr *Manager,
 		return
 	}
 	_ = mgr.store.UpdateContainerState(ctx, c.ContainerId, c.DockerId, c.State, c.Status)
-	if c.Action == "destroy" {
+	if isTerminalGPUAction(c.Action) {
 		_ = mgr.store.FreeGPUs(ctx, c.ContainerId)
 	}
 	mgr.publish(NodeUpdate{NodeID: s.NodeID, Kind: "container", At: time.Now()})
+}
+
+// isTerminalGPUAction reports whether the docker events-stream action
+// means the container is no longer holding its GPU devices. We release
+// the master's gpu_alloc row on all of these so a subsequent start can
+// re-reserve the same indices; without this, an OOM-killed or
+// docker-stopped container leaves an orphan row that blocks restart
+// with "requested GPU index is already allocated".
+func isTerminalGPUAction(action string) bool {
+	switch action {
+	case "die", "stop", "kill", "destroy":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Session) close(reason string) {

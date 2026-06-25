@@ -411,3 +411,100 @@ func TestHandleContainerStateChanged_OrphanIgnored(t *testing.T) {
 		t.Errorf("orphan event should not create a container row")
 	}
 }
+
+// seedTerminalActionContainer creates a node with 4 GPUs, a running
+// container, and a 2-GPU reservation. Returned by the terminal-action
+// tests below; each subtest runs against its own fresh DB so a fixed
+// MachineId is safe.
+func seedTerminalActionContainer(t *testing.T, m *Manager) string {
+	t.Helper()
+	ctx := context.Background()
+	nodeID, _ := m.resolveNodeID(ctx, &pb.RegisterRequest{
+		Name: "n", Hostname: "h", MachineId: "machine-terminal-action",
+	})
+	if err := m.store.UpsertNode(ctx, &store.Node{
+		ID: nodeID, MachineID: "machine-terminal-action",
+		Name: "n", State: "online", GpuCount: 4,
+	}); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+	if err := m.store.InsertContainer(ctx, &store.Container{
+		ID: "c1", NodeID: nodeID, DockerID: "deadbeef",
+		Image: "tf:latest", State: "running", Status: "running",
+	}); err != nil {
+		t.Fatalf("InsertContainer: %v", err)
+	}
+	if _, err := m.store.AllocGPUs(ctx, nodeID, "c1", 2, 4); err != nil {
+		t.Fatalf("AllocGPUs: %v", err)
+	}
+	return nodeID
+}
+
+func assertContainerHoldsNoGPUs(t *testing.T, m *Manager, containerID string) {
+	t.Helper()
+	idx, err := m.store.GetContainerGPUs(context.Background(), containerID)
+	if err != nil {
+		t.Fatalf("GetContainerGPUs: %v", err)
+	}
+	if len(idx) != 0 {
+		t.Errorf("expected GPUs released, still hold %v", idx)
+	}
+}
+
+// TestHandleContainerStateChanged_TerminalActionsFreeGPUs locks in
+// that every docker event-stream action that means "container no
+// longer holds its GPUs" releases the master's reservation. Without
+// this, an OOM-killed or out-of-band docker stop blocks subsequent
+// /start with "requested GPU index is already allocated".
+func TestHandleContainerStateChanged_TerminalActionsFreeGPUs(t *testing.T) {
+	cases := []struct {
+		name   string
+		action string
+	}{
+		{"die", "die"},
+		{"stop", "stop"},
+		{"kill", "kill"},
+		{"destroy", "destroy"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestManager(t)
+			nodeID := seedTerminalActionContainer(t, m)
+			sess := newSession(nodeID, "n", nil, "")
+			sess.handleContainerStateChanged(context.Background(), m, &pb.ContainerStateChanged{
+				ContainerId: "c1",
+				DockerId:    "deadbeef",
+				Action:      tc.action,
+				State:       "exited",
+				Status:      "exited",
+			})
+			assertContainerHoldsNoGPUs(t, m, "c1")
+		})
+	}
+}
+
+// TestHandleContainerStarted_ErrorFreesGPUs covers the rare race
+// where the agent acks StartContainer with an error: the master
+// pre-reserved the GPU in startContainer; the error means the docker
+// container is not running and never will be. We must release the
+// reservation here, otherwise the next /start hits the same row and
+// returns "requested GPU index is already allocated".
+func TestHandleContainerStarted_ErrorFreesGPUs(t *testing.T) {
+	m := newTestManager(t)
+	nodeID := seedTerminalActionContainer(t, m)
+	sess := newSession(nodeID, "n", nil, "")
+	sess.handleContainerStarted(context.Background(), m, &pb.ContainerStarted{
+		ContainerId: "c1",
+		DockerId:    "deadbeef",
+		Error:       "docker start: device busy",
+	})
+	assertContainerHoldsNoGPUs(t, m, "c1")
+
+	cc, err := m.store.GetContainer(context.Background(), "c1")
+	if err != nil {
+		t.Fatalf("GetContainer: %v", err)
+	}
+	if cc.State != "error" {
+		t.Errorf("state = %q, want %q", cc.State, "error")
+	}
+}
