@@ -107,6 +107,7 @@ function ctrsByState(nodeId: string) {
             <div class="row-tight">
               <span class="status-dot" :class="n.state" aria-hidden="true" />
               <span class="node-card-name">{{ n.name }}</span>
+              <span v-if="n.ip" class="node-card-ip">{{ n.ip }}</span>
             </div>
             <span class="badge" :class="n.state === 'online' ? 'is-success' : ''">{{ t('state.' + n.state, n.state) }}</span>
           </div>
@@ -279,6 +280,7 @@ function ctrsByState(nodeId: string) {
   min-width: 0;
 }
 .node-card.is-offline { opacity: 0.78; }
+.node-card-ip { font: 500 var(--fs-sm)/1 var(--font-mono); color: var(--text-dim); margin-left: var(--sp-2); }
 
 .node-spec {
   display: flex;
